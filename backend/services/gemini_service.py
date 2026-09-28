@@ -148,34 +148,34 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
                     ),
                 )
 
-            raw_text = response.text.strip()
+                raw_text = response.text.strip()
 
-            # Strip markdown fences if Gemini wraps them anyway
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("\n", 1)[1]
-            if raw_text.endswith("```"):
-                raw_text = raw_text.rsplit("```", 1)[0]
+                # Strip markdown fences if Gemini wraps them anyway
+                if raw_text.startswith("```"):
+                    raw_text = raw_text.split("\n", 1)[1]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text.rsplit("```", 1)[0]
 
-            flow_dict = json.loads(raw_text)
-            return flow_dict
+                flow_dict = json.loads(raw_text)
+                return flow_dict
 
-        except json.JSONDecodeError as e:
-            last_error = e
-            print(
-                f"  [WARN] Attempt {attempt}/{MAX_RETRIES}: "
-                f"Gemini returned invalid JSON - retrying..."
-            )
-            # Append correction to the prompt
-            user_prompt += (
-                "\n\nYour previous response was not valid JSON. "
-                "Return ONLY a JSON object, no other text."
-            )
-        except Exception as e:
-            last_error = e
-            print(
-                f"  [WARN] Attempt {attempt}/{MAX_RETRIES}: "
-                f"Gemini API error: {e}"
-            )
+            except json.JSONDecodeError as e:
+                last_error = e
+                print(
+                    f"  [WARN] Attempt {attempt}/{MAX_RETRIES}: "
+                    f"Gemini returned invalid JSON - retrying..."
+                )
+                # Append correction to the prompt
+                user_prompt += (
+                    "\n\nYour previous response was not valid JSON. "
+                    "Return ONLY a JSON object, no other text."
+                )
+            except Exception as e:
+                last_error = e
+                print(
+                    f"  [WARN] Attempt {attempt}/{MAX_RETRIES} ({model_name}): "
+                    f"Gemini API error: {e}"
+                )
 
     raise RuntimeError(
         f"Failed to compile flow after {MAX_RETRIES} attempts. "
