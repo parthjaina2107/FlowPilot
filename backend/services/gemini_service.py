@@ -8,10 +8,13 @@ import json
 import os
 from typing import Any
 
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
 from models.schemas import FlowGraph, RecordingTrace
+
+load_dotenv()
 
 # ---------------------------------------------
 # System prompt for the flow compiler
@@ -129,19 +132,21 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
     )
 
     last_error: Exception | None = None
+    FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.8-flash"]
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=FLOW_COMPILER_SYSTEM_PROMPT,
-                    response_mime_type="application/json",
-                    temperature=0.2,
-                    max_output_tokens=4096,
-                ),
-            )
+    for model_name in FALLBACK_MODELS:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=FLOW_COMPILER_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        temperature=0.2,
+                        max_output_tokens=4096,
+                    ),
+                )
 
             raw_text = response.text.strip()
 
@@ -209,7 +214,7 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
         )
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-flash-latest",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
