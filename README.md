@@ -96,14 +96,6 @@ flowpilot/
 | `POST` | `/api/match/text` | Match text command → flow |
 | `POST` | `/api/match/audio` | Match audio command → flow |
 
-## Team
-
-| Role | Name |
-|------|------|
-| Team Lead | Member 1 |
-| AI/ML Lead | Member 2 |
-| Android Lead | Member 3 |
-| UX/Systems Lead | Member 4 |
 
 ## License
 
