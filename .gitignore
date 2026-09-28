@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Environment
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+
+# Data (generated at runtime)
+backend/data/
+*.db
+*.sqlite3
+chromadb/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/.cxx/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

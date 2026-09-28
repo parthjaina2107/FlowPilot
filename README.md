@@ -1,0 +1,110 @@
+# 🚀 FlowPilot
+
+**Learn-once, replay-anywhere voice automation for Android.**
+
+> Samsung PRISM Generative AI Hackathon — 3rd Edition (2026–27)  
+> Theme #03: Teachable Voice Automation  
+> Team Cheesecake · SRM University, Kattankulathur
+
+---
+
+## What is FlowPilot?
+
+FlowPilot lets users **demonstrate a task once** inside any Android app, and the system automatically generalises it into a **reusable, parameterised flow** that can be triggered by natural voice commands.
+
+**Example:** Record yourself ordering paneer on Zomato → later say "Get me 2 naans from Zomato" and FlowPilot replays the flow with the new parameters.
+
+## Architecture
+
+```
+4-Stage Pipeline: LEARN → GENERALISE → MATCH → REPLAY
+
+┌─────────────┐    ┌──────────────────┐    ┌───────────────┐    ┌───────────────┐
+│   LEARN     │───▶│   GENERALISE     │───▶│    MATCH      │───▶│    REPLAY     │
+│             │    │                  │    │               │    │               │
+│ Accessibility│    │ Gemini 2.0 Flash │    │ Sentence-BERT │    │ Semantic      │
+│ Service      │    │ Flow Compiler    │    │ + ChromaDB    │    │ Element       │
+│ captures UI  │    │ creates abstract │    │ matches voice │    │ Finder        │
+│ tree+actions │    │ FlowGraph with   │    │ commands to   │    │ executes      │
+│              │    │ parameter slots  │    │ stored flows  │    │ adaptively    │
+└─────────────┘    └──────────────────┘    └───────────────┘    └───────────────┘
+```
+
+## Tech Stack
+
+| Layer | Technologies |
+|-------|-------------|
+| **Core AI** | Gemini 2.0 Flash (flow synthesis) · Whisper (STT) · Sentence-BERT (matching) |
+| **Android** | AccessibilityService · Kotlin · Jetpack Compose · Material 3 |
+| **Backend** | FastAPI · SQLite · ChromaDB · Docker |
+
+## Quick Start
+
+### Backend
+
+```bash
+cd backend
+
+# Option 1: Docker
+docker-compose up
+
+# Option 2: Local
+echo "GEMINI_API_KEY=your_key" > .env
+pip install -r requirements.txt
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### Android
+
+1. Open `android/` in Android Studio
+2. Update `BACKEND_URL` in `app/build.gradle.kts` to your server IP
+3. Build and install on device
+4. Enable FlowPilot in **Settings → Accessibility**
+
+### Demo
+
+1. **Record:** Enter flow name → Start Recording → Switch to target app → Perform task → Return and Stop
+2. **Replay:** Tap mic → Say a command → FlowPilot matches and replays with new parameters
+
+## Project Structure
+
+```
+flowpilot/
+├── android/                  # Kotlin + Jetpack Compose app
+│   └── app/src/main/java/com/flowpilot/
+│       ├── service/          # AccessibilityService (Record + Replay)
+│       ├── network/          # Retrofit API client
+│       ├── model/            # Data classes
+│       └── MainActivity.kt   # Compose UI
+├── backend/                  # Python FastAPI server
+│   ├── routers/              # API endpoints
+│   ├── services/             # Gemini, SBERT, Whisper
+│   └── models/               # Pydantic schemas + DB
+├── docker-compose.yml
+└── README.md
+```
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Health check |
+| `GET` | `/api/flows` | List all flows |
+| `GET` | `/api/flows/{id}` | Get flow details |
+| `DELETE` | `/api/flows/{id}` | Delete a flow |
+| `POST` | `/api/generalise/compile` | Compile trace → FlowGraph |
+| `POST` | `/api/match/text` | Match text command → flow |
+| `POST` | `/api/match/audio` | Match audio command → flow |
+
+## Team
+
+| Role | Name |
+|------|------|
+| Team Lead | Member 1 |
+| AI/ML Lead | Member 2 |
+| Android Lead | Member 3 |
+| UX/Systems Lead | Member 4 |
+
+## License
+
+Built for Samsung PRISM Generative AI Hackathon 2026–27.

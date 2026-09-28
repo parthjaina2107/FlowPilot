@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">FlowPilot</string>
+    <string name="accessibility_service_description">FlowPilot needs accessibility access to record and replay your actions across apps. This data stays on your device and is only sent to your own backend server for flow compilation.</string>
+</resources>
