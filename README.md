@@ -38,6 +38,12 @@ FlowPilot lets users **demonstrate a task once** inside any Android app, and the
 | **Android** | AccessibilityService · Kotlin · Jetpack Compose · Material 3 |
 | **Backend** | FastAPI · SQLite · ChromaDB · Docker |
 
+## Documentation
+
+* 📐 **[Technical Architecture & Pipeline Specification](docs/ARCHITECTURE.md)**: Deep dive into the 4-stage pipeline, Accessibility tree capture, and cascading element fallback.
+* 🏆 **[Samsung PRISM Pitch & Demo Guide](docs/HACKATHON_PITCH.md)**: 30-second hook, 3-minute live demo script, competitive advantage matrix, and judge Q&A.
+* 📡 **[REST API Reference](docs/API_REFERENCE.md)**: Endpoints, request/response models, and curl examples.
+
 ## Quick Start
 
 ### Backend
