@@ -63,14 +63,19 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ### Android
 
 1. Open `android/` in Android Studio
-2. Update `BACKEND_URL` in `app/build.gradle.kts` to your server IP
-3. Build and install on device
-4. Enable FlowPilot in **Settings → Accessibility**
+2. Update `BACKEND_URL` in `app/build.gradle.kts`:
+   - **Emulator**: `http://10.0.2.2:8000/` (default)
+   - **Physical Device via USB**: Run `adb reverse tcp:8000 tcp:8000` and use `http://127.0.0.1:8000/`
+   - **Physical Device via Wi-Fi**: Use host machine's LAN IP (e.g. `http://192.168.x.x:8000/`)
+3. Build and install on device or emulator
+4. Enable FlowPilot in **Settings → Accessibility → Installed Apps → FlowPilot** (turn ON)
+5. Grant Microphone permission for voice commands
 
 ### Demo
 
 1. **Record:** Enter flow name → Start Recording → Switch to target app → Perform task → Return and Stop
-2. **Replay:** Tap mic → Say a command → FlowPilot matches and replays with new parameters
+2. **Replay:** Tap mic → Say a command (e.g. *"Order butter chicken on Zomato"*) → FlowPilot matches and replays with new parameters
+3. **Verify:** Run automated end-to-end tests via `python test_flowpilot.py`
 
 ## Project Structure
 
