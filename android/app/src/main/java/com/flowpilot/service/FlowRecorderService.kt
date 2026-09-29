@@ -119,7 +119,7 @@ class FlowRecorderService : AccessibilityService() {
         this.triggerPhrase = triggerPhrase
         this.targetPackage = targetPackage
         this.recordedActions.clear()
-        this.actionCount = 0
+        actionCount = 0
         this.recordingStartTime = System.currentTimeMillis()
         isRecording = true
 

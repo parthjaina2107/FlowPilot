@@ -206,7 +206,8 @@ class FlowReplayService : AccessibilityService() {
 
     private suspend fun findElementWithRetry(selector: Map<String, String>, maxRetries: Int = 3): AccessibilityNodeInfo? {
         for (attempt in 1..maxRetries) {
-            val root = rootInActiveWindow ?: run {
+            val root = rootInActiveWindow
+            if (root == null) {
                 delay(1000)
                 continue
             }

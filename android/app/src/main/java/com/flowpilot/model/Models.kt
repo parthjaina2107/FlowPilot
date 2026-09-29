@@ -75,7 +75,7 @@ data class ParameterDef(
 )
 
 /**
- * Response from the /api/match/* endpoints.
+ * Response from the /api/match endpoints.
  */
 @Serializable
 data class MatchResult(
