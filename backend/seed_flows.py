@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 # Add backend root to sys.path
-backend_dir = Path(__file__).resolve().parent.parent
+backend_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(backend_dir))
 
 from models.database import init_db, save_flow, index_trigger_phrases

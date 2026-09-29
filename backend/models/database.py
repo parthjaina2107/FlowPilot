@@ -132,9 +132,11 @@ def query_triggers(command: str, top_k: int = 5) -> list[dict]:
     Returns list of {"flow_id", "flow_name", "phrase", "distance"}.
     """
     collection = _get_chroma_collection()
-    if collection.count() == 0:
+    count = collection.count()
+    if count == 0:
         return []
-    results = collection.query(query_texts=[command], n_results=top_k)
+    actual_k = min(top_k, count)
+    results = collection.query(query_texts=[command], n_results=actual_k)
     matches = []
     for i in range(len(results["ids"][0])):
         matches.append(

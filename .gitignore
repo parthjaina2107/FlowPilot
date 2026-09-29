@@ -6,6 +6,10 @@ dist/
 build/
 .eggs/
 *.egg
+.venv/
+venv/
+backend/.venv/
+
 
 # Environment
 .env

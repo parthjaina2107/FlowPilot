@@ -132,7 +132,7 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
     )
 
     last_error: Exception | None = None
-    FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.6-flash", "gemini-3.8-flash"]
+    FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
 
     for model_name in FALLBACK_MODELS:
         for attempt in range(1, MAX_RETRIES + 1):
@@ -213,17 +213,28 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
             f"Return ONLY a JSON object mapping parameter names to their values."
         )
 
-        response = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.1,
-                max_output_tokens=512,
-            ),
-        )
+        models_to_try = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+        raw_text = None
+        for m in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                        max_output_tokens=512,
+                    ),
+                )
+                raw_text = response.text.strip()
+                if raw_text:
+                    break
+            except Exception as e:
+                continue
 
-        raw_text = response.text.strip()
+        if not raw_text:
+            return defaults
+
         if raw_text.startswith("```"):
             raw_text = raw_text.split("\n", 1)[1]
         if raw_text.endswith("```"):
