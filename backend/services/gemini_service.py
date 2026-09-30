@@ -4,8 +4,10 @@ Gemini 2.0 Flash integration - compiles raw UI traces into generalised FlowGraph
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 from typing import Any
 
 from dotenv import load_dotenv
@@ -132,7 +134,13 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
     )
 
     last_error: Exception | None = None
-    FALLBACK_MODELS = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+    FALLBACK_MODELS = [
+        "gemini-flash-lite-latest",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3.7-flash",
+        "gemini-3.8-flash",
+    ]
 
     for model_name in FALLBACK_MODELS:
         for attempt in range(1, MAX_RETRIES + 1):
@@ -185,10 +193,10 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
 
 async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, Any]:
     """
-    Use Gemini to extract parameter values from a voice command.
+    Extract parameter values from a voice command using fast heuristics and async Gemini.
 
     Args:
-        command: The user's voice command, e.g. "Order 2 naans from Zomato"
+        command: The user's voice command, e.g. "Order 2 butter chicken from Zomato"
         parameter_schema: The flow's parameter schema with types and defaults.
 
     Returns:
@@ -201,10 +209,21 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
         name: schema.get("default", "")
         for name, schema in parameter_schema.items()
     }
+    extracted = dict(defaults)
 
+    # 1. Fast regex extraction (e.g. numbers for quantity)
+    for name, schema in parameter_schema.items():
+        if schema.get("type") == "integer":
+            match = re.search(r"\b(\d+)\b", command)
+            if match:
+                try:
+                    extracted[name] = int(match.group(1))
+                except ValueError:
+                    pass
+
+    # 2. Async Gemini extraction with strict timeout to preserve low match latency
     try:
         client = _get_client()
-
         prompt = (
             f"Given this voice command: '{command}'\n"
             f"And these flow parameters: {json.dumps(parameter_schema, indent=2)}\n\n"
@@ -213,40 +232,44 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
             f"Return ONLY a JSON object mapping parameter names to their values."
         )
 
-        models_to_try = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+        models_to_try = [
+            "gemini-flash-lite-latest",
+            "gemini-3-flash-preview",
+        ]
+
         raw_text = None
         for m in models_to_try:
             try:
-                response = client.models.generate_content(
-                    model=m,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                        max_output_tokens=512,
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            temperature=0.1,
+                            max_output_tokens=256,
+                        ),
                     ),
+                    timeout=2.0,
                 )
                 raw_text = response.text.strip()
                 if raw_text:
                     break
-            except Exception as e:
+            except Exception:
                 continue
 
-        if not raw_text:
-            return defaults
+        if raw_text:
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("\n", 1)[1]
+            if raw_text.endswith("```"):
+                raw_text = raw_text.rsplit("```", 1)[0]
 
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("\n", 1)[1]
-        if raw_text.endswith("```"):
-            raw_text = raw_text.rsplit("```", 1)[0]
-
-        extracted = json.loads(raw_text)
-        # Merge with defaults for any missing params
-        for k, v in defaults.items():
-            if k not in extracted:
-                extracted[k] = v
-        return extracted
+            gemini_extracted = json.loads(raw_text)
+            for k, v in gemini_extracted.items():
+                if k in parameter_schema:
+                    extracted[k] = v
 
     except Exception as e:
-        print(f"  [WARN] Parameter extraction fallback to defaults: {e}")
-        return defaults
+        print(f"  [WARN] Parameter extraction fallback: {e}")
+
+    return extracted

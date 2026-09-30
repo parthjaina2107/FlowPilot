@@ -52,7 +52,9 @@ SAMPLE_FLOWS = [
             "Play music on YouTube",
             "Search for a video on YouTube",
             "Watch a video on YouTube",
-            "YouTube play song"
+            "YouTube play song",
+            "Put on music on YouTube",
+            "Play lofi hip hop on YouTube"
         ],
         target_app_package="com.google.android.youtube",
         parameter_schema={
@@ -114,6 +116,33 @@ SAMPLE_FLOWS = [
             FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "Coldplay"}, description="Tap top search result", wait_after_ms=1500)
         ],
         created_at="2026-09-29T10:15:00Z",
+        version=1
+    ),
+    FlowGraph(
+        flow_id="flow-amazon-005",
+        flow_name="Buy Product on Amazon",
+        description="Searches for an item on Amazon, selects the first result, adds to cart, and proceeds to checkout",
+        trigger_phrases=[
+            "Buy protein powder on Amazon",
+            "Order item on Amazon",
+            "Search and buy on Amazon",
+            "Amazon buy product",
+            "Purchase something on Amazon"
+        ],
+        target_app_package="in.amazon.mShop.android.shopping",
+        parameter_schema={
+            "item_name": {"type": "string", "description": "Product or item to search and buy", "default": "protein powder"}
+        },
+        steps=[
+            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "in.amazon.mShop.android.shopping"}, description="Launch Amazon", wait_after_ms=3000),
+            FlowStep(step_index=1, action_type="click", selector={"role": "edittext", "text_contains": "Search Amazon.in"}, description="Tap search bar", wait_after_ms=1000),
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search Amazon.in"}, parameter_slot="item_name", default_value="protein powder", description="Type item name", wait_after_ms=1500),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "protein powder"}, description="Tap search suggestion", wait_after_ms=2500),
+            FlowStep(step_index=4, action_type="click", selector={"role": "viewgroup", "text_contains": "Results"}, description="Select first search result", wait_after_ms=2000),
+            FlowStep(step_index=5, action_type="click", selector={"role": "button", "text_contains": "Add to Cart"}, description="Tap Add to Cart", wait_after_ms=1500),
+            FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "Proceed to checkout"}, description="Proceed to checkout", wait_after_ms=1200, is_auth_pause=True)
+        ],
+        created_at="2026-09-30T10:00:00Z",
         version=1
     )
 ]

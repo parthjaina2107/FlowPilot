@@ -14,6 +14,7 @@ from models.schemas import FlowGraph
 router = APIRouter(prefix="/api/flows", tags=["Flows"])
 
 
+@router.get("", include_in_schema=False)
 @router.get("/")
 async def get_all_flows() -> list[dict]:
     """List all saved flows (summary info only)."""
