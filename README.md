@@ -244,7 +244,7 @@ Detailed step-by-step cue scripts and presentation guides are available in **[do
 
 - **Institution**: SRM Institute of Science and Technology, Kattankulathur
 - **Team Name**: Cheesecake
-- **Team Lead / Systems & AI**: Parth Jaina ([@parthjaina2107](https://github.com/parthjaina2107))
+- **Team Lead / Systems & AI**: Sanjeev Aryan
 - **Track**: Samsung PRISM Generative AI Hackathon 3.0 — Theme #03 (Teachable Voice Automation)
 - **Official Submission Tag**: [`PRISM_GENAI_HACKATHON_Y2026`](https://github.com/parthjaina2107/FlowPilot/releases/tag/PRISM_GENAI_HACKATHON_Y2026)
 
