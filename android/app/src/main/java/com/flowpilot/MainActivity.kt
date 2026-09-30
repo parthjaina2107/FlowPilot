@@ -178,16 +178,17 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     // Text To Speech Engine (Voice Agent Persona)
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     DisposableEffect(context) {
-        val t = TextToSpeech(context) { status ->
+        var speechEngine: TextToSpeech? = null
+        speechEngine = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                t?.language = Locale.US
+                speechEngine?.language = java.util.Locale.US
             }
         }
-        tts = t
+        tts = speechEngine
         onDispose {
             try {
-                t.stop()
-                t.shutdown()
+                speechEngine?.stop()
+                speechEngine?.shutdown()
             } catch (ignored: Exception) {}
         }
     }

@@ -91,12 +91,6 @@ class FlowReplayService : AccessibilityService() {
         Log.i(TAG, "✅ FlowReplayService connected to Android Accessibility Manager")
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        if (instance == this) {
-            instance = null
-        }
-    }
 
     override fun onInterrupt() {
         Log.w(TAG, "⚠️ FlowReplayService interrupted")
@@ -152,7 +146,7 @@ class FlowReplayService : AccessibilityService() {
         startReplayDirect(flow, params)
     }
 
-    private fun cancelReplay() {
+    fun cancelReplay() {
         replayJob?.cancel()
         authDeferred?.complete(false)
         isReplaying = false
@@ -810,6 +804,9 @@ class FlowReplayService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        if (instance == this) {
+            instance = null
+        }
         replayJob?.cancel()
         authDeferred?.complete(false)
         scope.cancel()
