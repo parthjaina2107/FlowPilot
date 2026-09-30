@@ -42,6 +42,7 @@ FlowPilot lets users **demonstrate a task once** inside any Android app, and the
 
 * 📐 **[Technical Architecture & Pipeline Specification](docs/ARCHITECTURE.md)**: Deep dive into the 4-stage pipeline, Accessibility tree capture, and cascading element fallback.
 * 🏆 **[Samsung PRISM Pitch & Demo Guide](docs/HACKATHON_PITCH.md)**: 30-second hook, 3-minute live demo script, competitive advantage matrix, and judge Q&A.
+* 📊 **[Samsung PRISM Submission Pitch Deck](docs/presentation/SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)**: Official PowerPoint presentation for Track 03 (Teachable Voice Automation).
 * 📡 **[REST API Reference](docs/API_REFERENCE.md)**: Endpoints, request/response models, and curl examples.
 
 ## Quick Start

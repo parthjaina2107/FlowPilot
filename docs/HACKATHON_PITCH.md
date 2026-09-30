@@ -3,7 +3,8 @@
 > **Track**: Teachable Voice Automation (Theme #03)  
 > **Institution**: SRM University, Kattankulathur  
 > **Team**: Cheesecake  
-> **Solution**: FlowPilot — Learn-Once, Replay-Anywhere Voice Automation for Android
+> **Solution**: FlowPilot — Learn-Once, Replay-Anywhere Voice Automation for Android  
+> **Presentation Deck**: [`docs/presentation/SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx`](presentation/SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)  
 
 ---
 
