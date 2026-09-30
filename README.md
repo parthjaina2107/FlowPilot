@@ -4,7 +4,7 @@
 
 [![Samsung PRISM](https://img.shields.io/badge/Samsung_PRISM-GenAI_Hackathon_3.0-0c2340?style=for-the-badge&logo=samsung)](https://github.com/parthjaina2107/FlowPilot)
 [![Theme](https://img.shields.io/badge/Theme_%2303-Teachable_Voice_Automation-1428a0?style=for-the-badge)](docs/EVALUATION_CRITERIA.md)
-[![Team](https://img.shields.io/badge/Team-Cheesecake_·_SRMIST-008080?style=for-the-badge)](SRMUniversity_Cheesecake_Submission.pptx)
+[![Team](https://img.shields.io/badge/Team-Cheesecake_·_SRMIST-008080?style=for-the-badge)](SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)
 [![Release Tag](https://img.shields.io/badge/Release_Tag-PRISM__GENAI__HACKATHON__Y2026-green?style=for-the-badge)](https://github.com/parthjaina2107/FlowPilot/releases/tag/PRISM_GENAI_HACKATHON_Y2026)
 
 > **Event**: Samsung PRISM Generative AI Hackathon — 3rd Edition (2026–27)  
@@ -34,10 +34,10 @@ Every requirement specified in the **Samsung PRISM Theme 3 Guidelines** is fulfi
 | Deliverable | Description | Direct Access Link |
 | :--- | :--- | :--- |
 | 📦 **Installable APK** | Pre-compiled, installable Android debug APK ready for evaluation | **[FlowPilot-v1.0-debug.apk](FlowPilot-v1.0-debug.apk)** |
-| 🎬 **Demo Video (≤ 5 min)** | Official 5-part unedited video (Teach, Exact Replay, Paraphrase, Slot Variation, Stuck Query) | **[Watch Official Demo Video (Google Drive)](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)** |
+| 🎬 **Demo Video (≤ 5 min)** | Official 5-part unedited video (Teach, Exact Replay, Paraphrase, Slot Variation, Stuck Query) | **[Watch Official Demo (YouTube / Drive)](docs/HACKATHON_PITCH.md#2-official-5-minute-unedited-demonstration-script)** |
 | 📊 **Official Pitch Deck** | Official submission presentation file (`CollegeName_TeamName_Submission_ppt`) | **[SRMUniversity_Cheesecake_Submission.pptx](SRMUniversity_Cheesecake_Submission.pptx)** |
 | 📋 **Evaluation Compliance** | Point-by-point compliance against test cases T1–T14 and bonus points | **[docs/EVALUATION_CRITERIA.md](docs/EVALUATION_CRITERIA.md)** |
-| 📝 **AI Usage Disclosure** | Official LangAI 3.0 AI Usage Disclosure & Compliance Form | **[AI_DISCLOSURE.md](AI_DISCLOSURE.md)** |
+| 📝 **AI Usage Disclosure** | Official LangAI 3.0 AI Usage Disclosure & Compliance Form | **[AI_DISCLOSURE.md](AI_DISCLOSURE.md)** · **[DOCX (LangAI)](LangAI3_0_AI_Disclosure_Filled.docx)** · **[DOCX (SRM Format)](SRMUniversity_Cheesecake_AI_Disclosure.docx)** · **[PDF](SRMUniversity_Cheesecake_AI_Disclosure.pdf)** |
 | 🏆 **Pitch & Demo Guide** | 30-sec elevator pitch, 5-part unedited live demo script, and judge Q&A | **[docs/HACKATHON_PITCH.md](docs/HACKATHON_PITCH.md)** |
 | 📐 **Architecture Spec** | Full pipeline specification, accessibility schemas, and cascading fallback | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** |
 | 📊 **Benchmark Suite** | Automated evaluation suite across 25 queries, 5 apps, with latency metrics | **[docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md)** |
@@ -225,8 +225,6 @@ This verifies:
 
 ## 🎬 5-Minute Live Demonstration Flow
 
-> **Official Demo Video**: 🔗 **[Watch on Google Drive (SRMUniversity_Cheesecake_FlowPilot_Demo)](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)**
-
 The live demo and submission video follow the exact unedited 5-step sequence required by the Samsung PRISM jury:
 
 ```
@@ -247,6 +245,8 @@ Detailed step-by-step cue scripts and presentation guides are available in **[do
 - **Institution**: SRM Institute of Science and Technology, Kattankulathur
 - **Team Name**: Cheesecake
 - **Team Lead / Systems & AI**: Sanjeev Aryan
+- **Email**: [aryansanjeev0651@gmail.com](mailto:aryansanjeev0651@gmail.com)
+- **AI Usage Disclosure**: **[AI_DISCLOSURE.md](AI_DISCLOSURE.md)** · **[LangAI3_0_AI_Disclosure_Filled.docx](LangAI3_0_AI_Disclosure_Filled.docx)** · **[SRMUniversity_Cheesecake_AI_Disclosure.docx](SRMUniversity_Cheesecake_AI_Disclosure.docx)**
 - **Track**: Samsung PRISM Generative AI Hackathon 3.0 — Theme #03 (Teachable Voice Automation)
 - **Official Submission Tag**: [`PRISM_GENAI_HACKATHON_Y2026`](https://github.com/parthjaina2107/FlowPilot/releases/tag/PRISM_GENAI_HACKATHON_Y2026)
 
