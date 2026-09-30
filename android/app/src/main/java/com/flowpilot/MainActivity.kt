@@ -170,6 +170,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var ambiguityOptions by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingAmbiguousMatch by remember { mutableStateOf<MatchResult?>(null) }
 
+    // Server Config Dialog State
+    var showServerConfigDialog by remember { mutableStateOf(false) }
+    var serverUrlInput by remember { mutableStateOf(ApiClient.getBaseUrl()) }
+
     // Speech Recognizer instance
     var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var rmsLevel by remember { mutableFloatStateOf(0f) }
@@ -417,6 +421,11 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showServerConfigDialog = true }) {
+                        Icon(Icons.Filled.Dns, contentDescription = "Server Config", tint = SamsungLightBlue)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -793,6 +802,61 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         statusMessage = "Clarification cancelled."
                     }
                 ) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = CardBg,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    if (showServerConfigDialog) {
+        AlertDialog(
+            onDismissRequest = { showServerConfigDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Dns, contentDescription = null, tint = SamsungLightBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Backend Server IP", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "Set backend server URL for API communication:",
+                        color = TextPrimary,
+                        fontSize = 13.sp
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = serverUrlInput,
+                        onValueChange = { serverUrlInput = it },
+                        label = { Text("Base URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "• Emulator default: http://10.0.2.2:8000/\n• USB ADB Reverse: http://127.0.0.1:8000/\n• Wi-Fi LAN: http://<laptop-ip>:8000/",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        ApiClient.setBaseUrl(serverUrlInput)
+                        showServerConfigDialog = false
+                        Toast.makeText(context, "Server URL updated: $serverUrlInput", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue)
+                ) {
+                    Text("Save & Apply")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showServerConfigDialog = false }) {
                     Text("Cancel")
                 }
             },

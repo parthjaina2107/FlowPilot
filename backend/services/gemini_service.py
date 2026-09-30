@@ -1,5 +1,6 @@
 """
 Gemini 2.0 Flash integration - compiles raw UI traces into generalised FlowGraphs.
+Includes deterministic heuristic fallback compiler for offline resilience (as declared in AI_DISCLOSURE.md).
 """
 
 from __future__ import annotations
@@ -92,36 +93,126 @@ RULES:
 _client: genai.Client | None = None
 
 
-def _get_client() -> genai.Client:
+def _get_client() -> genai.Client | None:
     """Lazy-initialise the Gemini client."""
     global _client
     if _client is None:
         api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "GEMINI_API_KEY not set. Add it to backend/.env"
-            )
-        _client = genai.Client(api_key=api_key)
+        if not api_key or api_key.strip() == "your_gemini_api_key_here":
+            return None
+        try:
+            _client = genai.Client(api_key=api_key)
+        except Exception as e:
+            print(f"  [WARN] Could not initialise Gemini client: {e}")
+            return None
     return _client
+
+
+# ---------------------------------------------
+# Heuristic Fallback Compiler (Offline & Resilient)
+# ---------------------------------------------
+
+def compile_flow_heuristic(trace: RecordingTrace) -> dict[str, Any]:
+    """
+    Deterministic rule-based compiler fallback for offline use, quota limits,
+    or network failure (declared in AI_DISCLOSURE.md).
+    """
+    steps = []
+    param_schema = {}
+    step_idx = 0
+
+    # Ensure app launch step exists
+    has_open_app = any(a.action_type == "open_app" for a in trace.actions)
+    if not has_open_app and trace.target_app_package:
+        steps.append({
+            "step_index": step_idx,
+            "action_type": "open_app",
+            "selector": {"role": "app", "package": trace.target_app_package},
+            "parameter_slot": None,
+            "default_value": None,
+            "description": f"Launch {trace.target_app_package}",
+            "wait_after_ms": 2500,
+            "is_auth_pause": False
+        })
+        step_idx += 1
+
+    for a in trace.actions:
+        cls_lower = a.element_class.lower()
+        role = "button" if "button" in cls_lower else ("edittext" if "edit" in cls_lower else "view")
+        selector: dict[str, str] = {}
+
+        if a.element_text and len(a.element_text.strip()) > 0:
+            selector["text_contains"] = a.element_text.strip()
+        if a.content_description and len(a.content_description.strip()) > 0:
+            selector["content_description_contains"] = a.content_description.strip()
+        if not selector and a.element_id:
+            selector["resource_id_contains"] = a.element_id
+        if not selector:
+            selector["role"] = role
+
+        # Auth & sensitive screen detection (T11)
+        text_context = ((a.element_text or "") + " " + (a.content_description or "")).lower()
+        is_auth = any(k in text_context for k in ["pay", "place order", "checkout", "otp", "password", "upi", "card"])
+
+        param_slot = None
+        default_val = None
+        if a.action_type == "type" and a.typed_text:
+            param_slot = "query" if "search" in text_context else "item_name"
+            default_val = a.typed_text
+            param_schema[param_slot] = {
+                "type": "string",
+                "description": f"Extracted parameter for {param_slot}",
+                "default": default_val
+            }
+
+        desc = f"Tap '{a.element_text or a.content_description or role}'" if a.action_type == "click" else (
+            f"Type '{default_val}'" if a.action_type == "type" else a.action_type.capitalize()
+        )
+
+        steps.append({
+            "step_index": step_idx,
+            "action_type": a.action_type,
+            "selector": selector,
+            "parameter_slot": param_slot,
+            "default_value": default_val or a.typed_text,
+            "description": desc,
+            "wait_after_ms": 1500 if a.action_type == "type" else 1000,
+            "is_auth_pause": is_auth
+        })
+        step_idx += 1
+
+    return {
+        "flow_name": trace.flow_name,
+        "description": f"Automated flow for {trace.flow_name} in {trace.target_app_package}",
+        "trigger_phrases": [
+            trace.trigger_phrase,
+            f"Run {trace.flow_name}",
+            f"Open and {trace.flow_name}"
+        ],
+        "target_app_package": trace.target_app_package,
+        "parameter_schema": param_schema,
+        "steps": steps
+    }
 
 
 # ---------------------------------------------
 # Flow compilation
 # ---------------------------------------------
 
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 
 
 async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
     """
     Send a raw RecordingTrace to Gemini 2.0 Flash and receive
-    a generalised flow definition (dict ready to become a FlowGraph).
-
-    Returns the raw dict (caller adds flow_id, created_at, version).
+    a generalised flow definition. Falls back gracefully to heuristic compiler.
     """
     client = _get_client()
+    if client is None:
+        print("  [INFO] GEMINI_API_KEY not configured. Using deterministic heuristic compiler fallback.")
+        return compile_flow_heuristic(trace)
 
-    # Build the user prompt
+    # Build prompt
     actions_json = json.dumps(
         [action.model_dump() for action in trace.actions], indent=2
     )
@@ -133,12 +224,10 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
         f"Compile this into a generalised FlowGraph."
     )
 
-    last_error: Exception | None = None
     FALLBACK_MODELS = [
-        "gemini-3.1-flash-lite",
-        "gemini-3.5-flash-lite",
-        "gemini-3.8-flash",
-        "gemini-flash-latest",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.0-flash-lite",
     ]
 
     for model_name in FALLBACK_MODELS:
@@ -156,8 +245,6 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
                 )
 
                 raw_text = response.text.strip()
-
-                # Strip markdown fences if Gemini wraps them anyway
                 if raw_text.startswith("```"):
                     raw_text = raw_text.split("\n", 1)[1]
                 if raw_text.endswith("```"):
@@ -166,40 +253,18 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
                 flow_dict = json.loads(raw_text)
                 return flow_dict
 
-            except json.JSONDecodeError as e:
-                last_error = e
-                print(
-                    f"  [WARN] Attempt {attempt}/{MAX_RETRIES}: "
-                    f"Gemini returned invalid JSON - retrying..."
-                )
-                # Append correction to the prompt
-                user_prompt += (
-                    "\n\nYour previous response was not valid JSON. "
-                    "Return ONLY a JSON object, no other text."
-                )
+            except json.JSONDecodeError:
+                print(f"  [WARN] Attempt {attempt}/{MAX_RETRIES} ({model_name}): invalid JSON from Gemini")
             except Exception as e:
-                last_error = e
-                print(
-                    f"  [WARN] Attempt {attempt}/{MAX_RETRIES} ({model_name}): "
-                    f"Gemini API error: {e}"
-                )
+                print(f"  [WARN] Attempt {attempt}/{MAX_RETRIES} ({model_name}): Gemini API error: {e}")
 
-    raise RuntimeError(
-        f"Failed to compile flow after {MAX_RETRIES} attempts. "
-        f"Last error: {last_error}"
-    )
+    print("  [WARN] All Gemini models failed or unavailable. Falling back to heuristic compiler.")
+    return compile_flow_heuristic(trace)
 
 
 async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, Any]:
     """
     Extract parameter values from a voice command using fast heuristics and async Gemini.
-
-    Args:
-        command: The user's voice command, e.g. "Order 2 butter chicken from Zomato"
-        parameter_schema: The flow's parameter schema with types and defaults.
-
-    Returns:
-        Dict of param_name -> extracted value.
     """
     if not parameter_schema:
         return {}
@@ -210,7 +275,7 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
     }
     extracted = dict(defaults)
 
-    # 1. Fast regex extraction (e.g. numbers for quantity)
+    # 1. Fast regex extraction (e.g. integer quantities like "2 pizzas" -> quantity = 2)
     for name, schema in parameter_schema.items():
         if schema.get("type") == "integer":
             match = re.search(r"\b(\d+)\b", command)
@@ -220,56 +285,57 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
                 except ValueError:
                     pass
 
-    # 2. Async Gemini extraction with strict timeout to preserve low match latency
-    try:
-        client = _get_client()
-        prompt = (
-            f"Given this voice command: '{command}'\n"
-            f"And these flow parameters: {json.dumps(parameter_schema, indent=2)}\n\n"
-            f"Extract the parameter values from the command. "
-            f"Use default values for any parameters not mentioned in the command.\n"
-            f"Return ONLY a JSON object mapping parameter names to their values."
-        )
+    # 2. Async Gemini extraction
+    client = _get_client()
+    if client is not None:
+        try:
+            prompt = (
+                f"Given this voice command: '{command}'\n"
+                f"And these flow parameters: {json.dumps(parameter_schema, indent=2)}\n\n"
+                f"Extract the parameter values from the command. "
+                f"Use default values for any parameters not mentioned in the command.\n"
+                f"Return ONLY a JSON object mapping parameter names to their values."
+            )
 
-        models_to_try = [
-            "gemini-3.1-flash-lite",
-            "gemini-3.5-flash-lite",
-            "gemini-3.8-flash",
-        ]
+            models_to_try = [
+                "gemini-2.0-flash",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash-lite",
+            ]
 
-        raw_text = None
-        for m in models_to_try:
-            try:
-                response = await asyncio.wait_for(
-                    client.aio.models.generate_content(
-                        model=m,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            temperature=0.1,
-                            max_output_tokens=256,
+            raw_text = None
+            for m in models_to_try:
+                try:
+                    response = await asyncio.wait_for(
+                        client.aio.models.generate_content(
+                            model=m,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                temperature=0.1,
+                                max_output_tokens=256,
+                            ),
                         ),
-                    ),
-                    timeout=2.0,
-                )
-                raw_text = response.text.strip()
-                if raw_text:
-                    break
-            except Exception:
-                continue
+                        timeout=2.0,
+                    )
+                    raw_text = response.text.strip()
+                    if raw_text:
+                        break
+                except Exception:
+                    continue
 
-        if raw_text:
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("\n", 1)[1]
-            if raw_text.endswith("```"):
-                raw_text = raw_text.rsplit("```", 1)[0]
+            if raw_text:
+                if raw_text.startswith("```"):
+                    raw_text = raw_text.split("\n", 1)[1]
+                if raw_text.endswith("```"):
+                    raw_text = raw_text.rsplit("```", 1)[0]
 
-            gemini_extracted = json.loads(raw_text)
-            for k, v in gemini_extracted.items():
-                if k in parameter_schema:
-                    extracted[k] = v
+                gemini_extracted = json.loads(raw_text)
+                for k, v in gemini_extracted.items():
+                    if k in parameter_schema:
+                        extracted[k] = v
 
-    except Exception as e:
-        print(f"  [WARN] Parameter extraction fallback: {e}")
+        except Exception as e:
+            print(f"  [WARN] Parameter extraction fallback: {e}")
 
     return extracted

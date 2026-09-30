@@ -52,6 +52,9 @@ interface FlowPilotApi {
  */
 object ApiClient {
 
+    private var customBaseUrl: String? = null
+    private var cachedApi: FlowPilotApi? = null
+
     val gson: Gson by lazy {
         GsonBuilder()
             .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
@@ -71,12 +74,24 @@ object ApiClient {
             .build()
     }
 
-    val api: FlowPilotApi by lazy {
-        Retrofit.Builder()
-            .baseUrl(BuildConfig.BACKEND_URL)
-            .client(okHttp)
-            .addConverterFactory(GsonConverterFactory.create(gson))
-            .build()
-            .create(FlowPilotApi::class.java)
+    fun setBaseUrl(newUrl: String) {
+        val clean = if (newUrl.endsWith("/")) newUrl else "$newUrl/"
+        customBaseUrl = clean
+        cachedApi = null
     }
+
+    fun getBaseUrl(): String = customBaseUrl ?: BuildConfig.BACKEND_URL
+
+    val api: FlowPilotApi
+        get() {
+            if (cachedApi == null) {
+                cachedApi = Retrofit.Builder()
+                    .baseUrl(getBaseUrl())
+                    .client(okHttp)
+                    .addConverterFactory(GsonConverterFactory.create(gson))
+                    .build()
+                    .create(FlowPilotApi::class.java)
+            }
+            return cachedApi!!
+        }
 }
