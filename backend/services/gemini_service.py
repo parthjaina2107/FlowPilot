@@ -290,12 +290,24 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
     # 1. Fast regex extraction (e.g. integer quantities like "2 pizzas", address tags like "to Home")
     for name, schema in parameter_schema.items():
         if schema.get("type") == "integer":
-            match = re.search(r"\b(\d+)\b", command)
-            if match:
-                try:
-                    extracted[name] = int(match.group(1))
-                except ValueError:
-                    pass
+            word_to_num = {
+                "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10
+            }
+            words = command.lower().split()
+            found_num = False
+            for w in words:
+                if w in word_to_num:
+                    extracted[name] = word_to_num[w]
+                    found_num = True
+                    break
+            if not found_num:
+                match = re.search(r"\b(\d+)\b", command)
+                if match:
+                    try:
+                        extracted[name] = int(match.group(1))
+                    except ValueError:
+                        pass
         elif name == "address":
             # Match patterns like: "to Home", "to Work", "deliver to Office", "at Home", "to Flat 402"
             addr_match = re.search(

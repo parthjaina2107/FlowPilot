@@ -41,6 +41,35 @@ async def _resolve_match(command: str) -> MatchResult:
     params = await extract_parameters(command, flow_graph.parameter_schema)
     params = {str(k): str(v) for k, v in params.items()}
 
+    # Bonus 2: Cross-App & Similar UI Generalization (ASIG Runtime Adapter)
+    cross_app_target = None
+    app_alias_map = {
+        "myntra": ("com.myntra.android", "Myntra", "Search"),
+        "flipkart": ("com.flipkart.android", "Flipkart", "Search"),
+        "meesho": ("com.meesho.supply", "Meesho", "Search"),
+        "swiggy": ("in.swiggy.android", "Swiggy", "Search"),
+    }
+    for alias, (pkg, app_name, search_placeholder) in app_alias_map.items():
+        if alias in cmd_lower:
+            cross_app_target = (pkg, app_name, search_placeholder)
+            break
+
+    if cross_app_target and flow_graph.target_app_package != cross_app_target[0]:
+        target_pkg, target_name, placeholder = cross_app_target
+        is_ecom_transfer = "amazon" in flow_graph.target_app_package and target_name in ["Myntra", "Flipkart", "Meesho"]
+        is_food_transfer = "zomato" in flow_graph.target_app_package and target_name in ["Swiggy"]
+
+        if is_ecom_transfer or is_food_transfer:
+            flow_graph.target_app_package = target_pkg
+            flow_graph.flow_name = f"{flow_graph.flow_name} → {target_name} (Cross-App ASIG)"
+            for step in flow_graph.steps:
+                if step.action_type == "open_app":
+                    step.selector["package"] = target_pkg
+                    step.description = f"Launch {target_name}"
+                elif step.step_index == 1 and "search" in step.description.lower():
+                    step.selector = {"role": "edittext", "text_contains": placeholder}
+                    step.description = f"Tap {target_name} search bar"
+
     # T13: Ambiguity Resolution (multi-candidate conflict, under-specified commands, or borderline confidence)
     is_ambiguous = False
     clarification_prompt = None
@@ -77,7 +106,7 @@ async def _resolve_match(command: str) -> MatchResult:
     return MatchResult(
         matched=True,
         flow_id=best["flow_id"],
-        flow_name=best["flow_name"],
+        flow_name=flow_graph.flow_name,
         confidence=best["confidence"],
         parameters=params,
         flow_graph=flow_graph,

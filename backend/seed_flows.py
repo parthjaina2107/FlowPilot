@@ -42,7 +42,7 @@ SAMPLE_FLOWS = [
             FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="dish_name", default_value="butter chicken", description="Type dish name", wait_after_ms=1500),
             FlowStep(step_index=3, action_type="click", selector={"role": "button", "text_contains": "Add"}, description="Tap Add button", wait_after_ms=1000),
             FlowStep(step_index=4, action_type="click", selector={"role": "button", "text_contains": "View Cart"}, description="Proceed to cart", wait_after_ms=1500),
-            FlowStep(step_index=5, action_type="click", selector={"role": "view", "text_contains": "Deliver to"}, parameter_slot="address", default_value="Home", description="Select delivery address", wait_after_ms=1200),
+            FlowStep(step_index=5, action_type="click", selector={"role": "view", "text_contains": "Deliver to Home"}, parameter_slot="address", default_value="Home", description="Select delivery address", wait_after_ms=1200),
             FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "Place Order"}, description="Place order", wait_after_ms=1000, is_auth_pause=True)
         ],
         created_at="2026-09-29T10:00:00Z",
@@ -141,7 +141,7 @@ SAMPLE_FLOWS = [
             FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "in.amazon.mShop.android.shopping"}, description="Launch Amazon", wait_after_ms=3000),
             FlowStep(step_index=1, action_type="click", selector={"role": "edittext", "text_contains": "Search Amazon.in"}, description="Tap search bar", wait_after_ms=1000),
             FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search Amazon.in"}, parameter_slot="item_name", default_value="protein powder", description="Type item name", wait_after_ms=1500),
-            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "protein powder"}, description="Tap search suggestion", wait_after_ms=2500),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "protein powder"}, parameter_slot="item_name", default_value="protein powder", description="Tap search suggestion", wait_after_ms=2500),
             FlowStep(step_index=4, action_type="click", selector={"role": "viewgroup", "text_contains": "Results"}, description="Select first search result", wait_after_ms=2000),
             FlowStep(step_index=5, action_type="click", selector={"role": "button", "text_contains": "Add to Cart"}, description="Tap Add to Cart", wait_after_ms=1500),
             FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "Proceed to checkout"}, description="Proceed to checkout", wait_after_ms=1200, is_auth_pause=True)

@@ -132,6 +132,7 @@ def run_tests():
     param_queries = [
         ("Deliver 3 butter chicken to Work from Zomato", "dish_name", "quantity", "address"),
         ("Order 2 butter chicken to Home on Zomato", "quantity", "address"),
+        ("Order two Margherita pizzas from Domino's on Zomato", "quantity"),
     ]
     for q, *expected_keys in param_queries:
         print(f"\nQuery   : \"{q}\"")
@@ -139,7 +140,7 @@ def run_tests():
         extracted = res.get("parameters", {})
         print(f"Extracted parameters: {extracted}")
         if "quantity" in extracted and int(str(extracted["quantity"])) >= 2:
-            print("  [PASS] T5 Quantity parameter resolved correctly.")
+            print(f"  [PASS] T5 Quantity parameter resolved correctly: {extracted.get('quantity')}.")
         if "address" in extracted:
             print(f"  [PASS] T6 Address parameter resolved correctly: '{extracted.get('address')}'.")
 
@@ -159,6 +160,19 @@ def run_tests():
         print(f"Options: {options}")
         if is_ambiguous:
             print("  [PASS] T13 Ambiguity successfully flagged for clarification.")
+
+    banner("TEST 8: Bonus 2 Cross-App Generalization (ASIG Runtime)")
+    cross_app_query = "Buy protein powder on Myntra"
+    print(f"\nQuery   : \"{cross_app_query}\"")
+    status, res = http_post("/api/match/text", {"command": cross_app_query})
+    matched = res.get("matched", False)
+    flow_name = res.get("flow_name", "")
+    target_pkg = res.get("flow_graph", {}).get("target_app_package", "")
+    print(f"Matched : {matched}")
+    print(f"Flow    : {flow_name}")
+    print(f"Package : {target_pkg}")
+    if matched and "Myntra" in flow_name and target_pkg == "com.myntra.android":
+        print("  [PASS] Bonus 2 Cross-App Generalization correctly adapted Amazon flow to Myntra!")
 
     banner("ALL VERIFICATION CHECKS COMPLETED!")
     print("FlowPilot Backend, Generalization (T5/T6), and Ambiguity Engine (T13) are fully operational!")

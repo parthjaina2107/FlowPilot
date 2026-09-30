@@ -138,6 +138,7 @@ class FlowReplayService : AccessibilityService() {
 
     private var replayJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var quantityIncrementDone = false
 
     override fun onCreate() {
         super.onCreate()
@@ -225,6 +226,7 @@ class FlowReplayService : AccessibilityService() {
     private suspend fun executeFlow(flow: FlowGraph, params: Map<String, String>) {
         var successCount = 0
         var failCount = 0
+        quantityIncrementDone = false
 
         showReplayNotification("Starting replay...", 0, flow.steps.size)
         FeedbackManager.speak("Starting ${flow.flowName}")
@@ -357,7 +359,7 @@ class FlowReplayService : AccessibilityService() {
         // Bonus 3: Mid-Flow Dynamic Parameter Clarification Gate
         val paramSlot = step.parameterSlot
         val effectiveParams = params.toMutableMap()
-        if (paramSlot != null && effectiveParams[paramSlot].isNullOrBlank() && step.defaultValue.isNullOrBlank()) {
+        if (paramSlot != null && (effectiveParams[paramSlot].isNullOrBlank() || effectiveParams[paramSlot] == "__UNRESOLVED__")) {
             val promptMsg = "Please provide value for $paramSlot"
             Log.i(TAG, "❓ [Bonus 3 Mid-Flow Clarification] $promptMsg")
             FeedbackManager.vibrateAlert()
@@ -389,6 +391,9 @@ class FlowReplayService : AccessibilityService() {
             if (!clarified.isNullOrBlank()) {
                 effectiveParams[paramSlot] = clarified
                 Log.i(TAG, "Clarified parameter '$paramSlot' = '$clarified'")
+            } else if (!step.defaultValue.isNullOrBlank()) {
+                effectiveParams[paramSlot] = step.defaultValue
+                Log.i(TAG, "User bypassed clarification, falling back to default value: ${step.defaultValue}")
             } else {
                 Log.w(TAG, "Missing parameter for $paramSlot, halting step.")
                 return false
@@ -438,7 +443,8 @@ class FlowReplayService : AccessibilityService() {
         val root = rootInActiveWindow ?: return false
         val sensitivePatterns = listOf(
             "enter password", "enter pin", "upi pin", "enter upi", "cvv", "enter otp",
-            "verify otp", "one time password"
+            "verify otp", "one time password", "select payment", "payment method", "pay using",
+            "card number", "expiry date", "proceed to pay", "net banking", "card details"
         )
         val found = findNodeRecursive(root) { node ->
             val text = (node.text?.toString() ?: "").lowercase()
@@ -460,18 +466,47 @@ class FlowReplayService : AccessibilityService() {
         step: FlowStep,
         params: Map<String, String>
     ): Map<String, String> {
-        val paramSlot = step.parameterSlot ?: return selector
-        val paramVal = params[paramSlot] ?: return selector
-        val defaultVal = step.defaultValue
-        if (defaultVal.isNullOrBlank()) return selector
+        var resolved = selector.toMutableMap()
 
-        return selector.mapValues { (_, value) ->
-            if (value.contains(defaultVal, ignoreCase = true)) {
-                value.replace(defaultVal, paramVal, ignoreCase = true)
-            } else {
-                value
-            }
+        // 1. Direct step slot parameter resolution
+        val paramSlot = step.parameterSlot
+        if (paramSlot != null && params.containsKey(paramSlot)) {
+            val paramVal = params[paramSlot] ?: ""
+            val defaultVal = step.defaultValue ?: ""
+
+            resolved = resolved.mapValues { (key, value) ->
+                if (defaultVal.isNotBlank() && value.contains(defaultVal, ignoreCase = true)) {
+                    value.replace(defaultVal, paramVal, ignoreCase = true)
+                } else if (key == "text_contains" && (paramSlot == "address" || paramSlot == "dish_name" || paramSlot == "item_name" || paramSlot == "query")) {
+                    if (value.contains("deliver to", ignoreCase = true) && !value.contains(paramVal, ignoreCase = true)) {
+                        "Deliver to $paramVal"
+                    } else if (defaultVal.isNotBlank()) {
+                        value.replace(defaultVal, paramVal, ignoreCase = true)
+                    } else {
+                        paramVal
+                    }
+                } else {
+                    value
+                }
+            }.toMutableMap()
         }
+
+        // 2. Universal Schema & Parameter Resolution (cross-step resilient substitution)
+        for ((slotKey, slotVal) in params) {
+            if (slotVal.isBlank()) continue
+            resolved = resolved.mapValues { (_, value) ->
+                val knownDefaults = listOf("protein powder", "butter chicken", "Home", "Domino's", "Margherita", "wireless earbuds")
+                var updated = value
+                for (d in knownDefaults) {
+                    if (updated.contains(d, ignoreCase = true) && (slotKey.contains("item") || slotKey.contains("dish") || slotKey.contains("address") || slotKey.contains("query"))) {
+                        updated = updated.replace(d, slotVal, ignoreCase = true)
+                    }
+                }
+                updated
+            }.toMutableMap()
+        }
+
+        return resolved
     }
 
     // ─────────────────────────────────────────────
@@ -510,10 +545,16 @@ class FlowReplayService : AccessibilityService() {
         // Wait slightly for click to register in the UI
         delay(350)
 
-        // T5: Dynamic Quantity Slot handling
+        // T5: Dynamic Quantity Slot handling (only execute once per flow on item addition)
         val qty = params["quantity"]?.toIntOrNull() ?: 1
-        if (clicked && qty > 1) {
-            handleQuantityIncrement(qty, step)
+        if (clicked && qty > 1 && !quantityIncrementDone) {
+            val isAddStep = step.parameterSlot == "quantity" ||
+                    step.description.contains("add", ignoreCase = true) ||
+                    step.selector["text_contains"]?.contains("add", ignoreCase = true) == true
+            if (isAddStep) {
+                handleQuantityIncrement(qty, step)
+                quantityIncrementDone = true
+            }
         }
 
         return clicked
@@ -558,15 +599,6 @@ class FlowReplayService : AccessibilityService() {
     }
 
     private suspend fun handleQuantityIncrement(targetQty: Int, baseStep: FlowStep) {
-        val isAddOrCart = baseStep.parameterSlot == "quantity" ||
-                baseStep.description.contains("add", ignoreCase = true) ||
-                baseStep.description.contains("cart", ignoreCase = true) ||
-                baseStep.description.contains("item", ignoreCase = true) ||
-                baseStep.selector["text_contains"]?.contains("add", ignoreCase = true) == true ||
-                baseStep.selector["text_contains"]?.contains("cart", ignoreCase = true) == true
-
-        if (!isAddOrCart) return
-
         Log.i(TAG, "➕ [T5 Quantity] Attempting to increment quantity to $targetQty")
         for (q in 2..targetQty) {
             delay(1000)
