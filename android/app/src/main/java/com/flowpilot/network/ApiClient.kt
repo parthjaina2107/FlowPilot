@@ -4,6 +4,9 @@ import com.flowpilot.BuildConfig
 import com.flowpilot.model.FlowGraph
 import com.flowpilot.model.MatchResult
 import com.flowpilot.model.RecordingTrace
+import com.google.gson.FieldNamingPolicy
+import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -49,6 +52,12 @@ interface FlowPilotApi {
  */
 object ApiClient {
 
+    val gson: Gson by lazy {
+        GsonBuilder()
+            .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
+            .create()
+    }
+
     private val okHttp: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
@@ -66,7 +75,7 @@ object ApiClient {
         Retrofit.Builder()
             .baseUrl(BuildConfig.BACKEND_URL)
             .client(okHttp)
-            .addConverterFactory(GsonConverterFactory.create())
+            .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
             .create(FlowPilotApi::class.java)
     }
