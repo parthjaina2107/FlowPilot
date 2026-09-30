@@ -13,6 +13,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.app.NotificationCompat
 import com.flowpilot.FlowPilotApp
 import com.flowpilot.model.UIAction
+import com.flowpilot.util.FeedbackManager
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -131,6 +132,7 @@ class FlowRecorderService : AccessibilityService() {
         isRecording = true
 
         showRecordingNotification()
+        FeedbackManager.speak("Recording started. Demonstrate your flow.")
         Log.i(TAG, "🔴 Recording started: '$flowName' in $targetPackage")
     }
 
@@ -145,8 +147,11 @@ class FlowRecorderService : AccessibilityService() {
             pendingTextAction = null
         }
 
-        // Save trace
+        // Save trace with smart touch pruning (Bonus 1)
         val tracePath = saveTrace()
+
+        FeedbackManager.vibrateSuccess()
+        FeedbackManager.speak("Recording complete. Compiling flow.")
 
         // Broadcast completion
         val completeIntent = Intent(ACTION_COMPLETE).apply {
@@ -259,12 +264,13 @@ class FlowRecorderService : AccessibilityService() {
 
     private fun saveTrace(): String {
         val traceId = "trace_${System.currentTimeMillis()}"
+        val cleanActions = pruneRecordedActions(recordedActions)
         val trace = com.flowpilot.model.RecordingTrace(
             traceId = traceId,
             flowName = flowName,
             triggerPhrase = triggerPhrase,
             targetAppPackage = targetPackage,
-            actions = recordedActions.toList(),
+            actions = cleanActions,
             recordedAt = java.time.Instant.now().toString()
         )
 
@@ -277,6 +283,64 @@ class FlowRecorderService : AccessibilityService() {
         file.writeText(jsonStr)
 
         return file.absolutePath
+    }
+
+    /**
+     * Bonus 1: Smart Touch Pruning
+     * Filters out unintentional UI interactions, rapid accidental double-taps,
+     * empty layout clicks, and immediate backtracks/cancellations.
+     */
+    private fun pruneRecordedActions(rawActions: List<UIAction>): List<UIAction> {
+        if (rawActions.isEmpty()) return emptyList()
+
+        val pruned = mutableListOf<UIAction>()
+
+        for (action in rawActions) {
+            if (pruned.isEmpty()) {
+                pruned.add(action)
+                continue
+            }
+
+            val prev = pruned.last()
+            val timeDelta = action.timestamp - prev.timestamp
+
+            // 1. Prune accidental rapid double-taps on the same element (< 300ms)
+            val isDuplicateClick = action.actionType == "click" && prev.actionType == "click" &&
+                    action.elementId == prev.elementId &&
+                    action.elementText == prev.elementText &&
+                    timeDelta < 300L
+
+            if (isDuplicateClick) {
+                Log.d(TAG, "  ✂️ [Bonus 1 Pruning] Dropped duplicate click within ${timeDelta}ms")
+                continue
+            }
+
+            // 2. Prune redundant empty taps on root layout without text/desc/id if followed by another tap
+            val isTrivialNoise = action.actionType == "click" &&
+                    action.elementText.isNullOrBlank() &&
+                    action.contentDescription.isNullOrBlank() &&
+                    action.elementId.isNullOrBlank() &&
+                    action.elementClass.lowercase().contains("layout") &&
+                    timeDelta < 500L
+
+            if (isTrivialNoise) {
+                Log.d(TAG, "  ✂️ [Bonus 1 Pruning] Dropped empty container touch noise")
+                continue
+            }
+
+            // 3. Prune backtrack / cancelled actions: if user clicks something and then immediately cancels/dismisses/back
+            val isBackOrCancel = action.elementText?.lowercase()?.let { it == "cancel" || it == "back" || it == "close" } == true
+            if (isBackOrCancel && timeDelta < 2000L && prev.actionType == "click") {
+                Log.d(TAG, "  ✂️ [Bonus 1 Pruning] Backtrack detected: cancelling previous tap on '${prev.elementText}'")
+                pruned.removeAt(pruned.size - 1)
+                continue
+            }
+
+            pruned.add(action)
+        }
+
+        Log.i(TAG, "✂️ [Bonus 1 Pruning] Pruned ${rawActions.size} actions -> ${pruned.size} clean actions")
+        return pruned
     }
 
     private fun showRecordingNotification() {

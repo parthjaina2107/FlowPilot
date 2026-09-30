@@ -26,12 +26,15 @@ SAMPLE_FLOWS = [
             "Order butter chicken on Zomato",
             "Get food from Zomato",
             "Order dinner from Zomato",
-            "Zomato food order"
+            "Zomato food order",
+            "Order butter chicken to Home on Zomato",
+            "Deliver food to Work from Zomato"
         ],
         target_app_package="com.application.zomato",
         parameter_schema={
             "dish_name": {"type": "string", "description": "Dish to order", "default": "butter chicken"},
-            "quantity": {"type": "integer", "description": "Quantity", "default": 1}
+            "quantity": {"type": "integer", "description": "Quantity", "default": 1},
+            "address": {"type": "string", "description": "Delivery address or label (e.g. Home, Work)", "default": "Home"}
         },
         steps=[
             FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.application.zomato"}, description="Launch Zomato", wait_after_ms=2500),
@@ -39,7 +42,8 @@ SAMPLE_FLOWS = [
             FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="dish_name", default_value="butter chicken", description="Type dish name", wait_after_ms=1500),
             FlowStep(step_index=3, action_type="click", selector={"role": "button", "text_contains": "Add"}, description="Tap Add button", wait_after_ms=1000),
             FlowStep(step_index=4, action_type="click", selector={"role": "button", "text_contains": "View Cart"}, description="Proceed to cart", wait_after_ms=1500),
-            FlowStep(step_index=5, action_type="click", selector={"role": "button", "text_contains": "Place Order"}, description="Place order", wait_after_ms=1000, is_auth_pause=True)
+            FlowStep(step_index=5, action_type="click", selector={"role": "view", "text_contains": "Deliver to"}, parameter_slot="address", default_value="Home", description="Select delivery address", wait_after_ms=1200),
+            FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "Place Order"}, description="Place order", wait_after_ms=1000, is_auth_pause=True)
         ],
         created_at="2026-09-29T10:00:00Z",
         version=1

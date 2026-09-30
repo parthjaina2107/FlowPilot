@@ -15,6 +15,7 @@ class FlowPilotApp : Application() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
+        com.flowpilot.util.FeedbackManager.init(this)
     }
 
     private fun createNotificationChannels() {

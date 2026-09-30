@@ -12,8 +12,8 @@ from models.database import get_flow, query_triggers
 # ---------------------------------------------
 
 # ChromaDB uses cosine distance (0 = identical, 2 = opposite).
-# A distance of 0.45 ~ cosine similarity of 0.55.
-MAX_DISTANCE_THRESHOLD = 0.45
+# A distance of 0.48 filters out non-domain queries (> 0.50) while retaining candidates for T13 ambiguity resolution.
+MAX_DISTANCE_THRESHOLD = 0.48
 
 
 async def find_matching_flow(command: str, top_k: int = 3) -> list[dict]:

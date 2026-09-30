@@ -18,6 +18,7 @@ import com.flowpilot.FlowPilotApp
 import com.flowpilot.model.FlowGraph
 import com.flowpilot.model.FlowStep
 import com.flowpilot.network.ApiClient
+import com.flowpilot.util.FeedbackManager
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 
@@ -35,6 +36,8 @@ import kotlinx.serialization.json.Json
  * 5. Gesture dispatch fallback for modern Compose/Custom views
  * 6. Dynamic quantity parameter incrementing (T5 Quantity Slot)
  * 7. Execution tracking and reporting (T14 Status Reporting)
+ * 8. Mid-Flow Parameter Clarification (Bonus 3)
+ * 9. Multimodal Voice & Haptic Feedback
  */
 class FlowReplayService : AccessibilityService() {
 
@@ -48,6 +51,8 @@ class FlowReplayService : AccessibilityService() {
         const val ACTION_AUTH_PAUSE = "com.flowpilot.AUTH_PAUSE"
         const val ACTION_AUTH_RESUME = "com.flowpilot.AUTH_RESUME"
         const val ACTION_AUTH_CANCEL = "com.flowpilot.AUTH_CANCEL"
+        const val ACTION_PARAM_NEEDED = "com.flowpilot.PARAM_NEEDED"
+        const val ACTION_PARAM_PROVIDED = "com.flowpilot.PARAM_PROVIDED"
 
         const val EXTRA_FLOW_JSON = "flow_json"
         const val EXTRA_PARAMS_JSON = "params_json"
@@ -57,7 +62,10 @@ class FlowReplayService : AccessibilityService() {
         const val EXTRA_STEP_DESC = "step_desc"
         const val EXTRA_FLOW_NAME = "flow_name"
         const val EXTRA_STUCK_REASON = "stuck_reason"
+        const val EXTRA_PARAM_NAME = "param_name"
+        const val EXTRA_PARAM_VALUE = "param_value"
 
+        private const val PREFS_NAME = "flowpilot_replay_prefs"
         private const val NOTIFICATION_ID = 2001
 
         var instance: FlowReplayService? = null
@@ -74,24 +82,74 @@ class FlowReplayService : AccessibilityService() {
         var lastRunFlowName: String = ""
         var lastRunHaltedStep: Int = 0
         var lastRunReason: String = ""
+        var lastRunTimestamp: Long = 0L
 
         private var authDeferred: CompletableDeferred<Boolean>? = null
+        private var paramDeferred: CompletableDeferred<String>? = null
 
         fun resumeAuth(proceed: Boolean) {
             authDeferred?.complete(proceed)
+        }
+
+        fun provideParam(value: String) {
+            paramDeferred?.complete(value)
+        }
+
+        fun persistLastRun(context: Context) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                lastRunTimestamp = System.currentTimeMillis()
+                prefs.edit().apply {
+                    putBoolean("last_success", lastRunSuccess ?: false)
+                    putString("last_flow_name", lastRunFlowName)
+                    putInt("last_halted_step", lastRunHaltedStep)
+                    putString("last_reason", lastRunReason)
+                    putLong("last_timestamp", lastRunTimestamp)
+                    apply()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to persist last run status: ${e.message}")
+            }
+        }
+
+        fun restoreLastRun(context: Context) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                if (prefs.contains("last_success")) {
+                    lastRunSuccess = prefs.getBoolean("last_success", false)
+                    lastRunFlowName = prefs.getString("last_flow_name", "") ?: ""
+                    lastRunHaltedStep = prefs.getInt("last_halted_step", 0)
+                    lastRunReason = prefs.getString("last_reason", "") ?: ""
+                    lastRunTimestamp = prefs.getLong("last_timestamp", 0L)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to restore last run status: ${e.message}")
+            }
+        }
+
+        fun getLastRunReport(): String {
+            return when {
+                lastRunSuccess == true -> "The last flow '$lastRunFlowName' completed successfully."
+                lastRunSuccess == false -> "The last flow '$lastRunFlowName' halted at step $lastRunHaltedStep: $lastRunReason"
+                else -> "No flows have been executed yet in this session."
+            }
         }
     }
 
     private var replayJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
+    override fun onCreate() {
+        super.onCreate()
+        restoreLastRun(this)
+        FeedbackManager.init(this)
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         Log.i(TAG, "✅ FlowReplayService connected to Android Accessibility Manager")
     }
-
-
     override fun onInterrupt() {
         Log.w(TAG, "⚠️ FlowReplayService interrupted")
     }
@@ -110,6 +168,10 @@ class FlowReplayService : AccessibilityService() {
             ACTION_CANCEL -> cancelReplay()
             ACTION_AUTH_RESUME -> resumeAuth(true)
             ACTION_AUTH_CANCEL -> resumeAuth(false)
+            ACTION_PARAM_PROVIDED -> {
+                val value = intent.getStringExtra(EXTRA_PARAM_VALUE) ?: ""
+                provideParam(value)
+            }
         }
         return START_STICKY
     }
@@ -165,6 +227,7 @@ class FlowReplayService : AccessibilityService() {
         var failCount = 0
 
         showReplayNotification("Starting replay...", 0, flow.steps.size)
+        FeedbackManager.speak("Starting ${flow.flowName}")
 
         for (step in flow.steps) {
             if (!isReplaying) break
@@ -201,6 +264,8 @@ class FlowReplayService : AccessibilityService() {
                 lastRunReason = "Could not find or interact with element for: ${step.description}"
 
                 showStuckNotification(step.description, step.stepIndex + 1, flow.steps.size)
+                FeedbackManager.vibrateAlert()
+                FeedbackManager.speak("Flow halted at step ${step.stepIndex + 1}. Could not find element for ${step.description}.")
 
                 val stuckIntent = Intent(ACTION_REPLAY_STUCK).apply {
                     putExtra(EXTRA_STEP_INDEX, step.stepIndex)
@@ -222,7 +287,13 @@ class FlowReplayService : AccessibilityService() {
             lastRunSuccess = true
             lastRunHaltedStep = flow.steps.size
             lastRunReason = "All ${flow.steps.size} steps completed successfully."
+            FeedbackManager.vibrateSuccess()
+            FeedbackManager.speak("${flow.flowName} completed successfully.")
+        } else {
+            FeedbackManager.speak("Execution halted: $lastRunReason")
         }
+
+        persistLastRun(this@FlowReplayService)
 
         // Broadcast completion result (T14 Reporting)
         val doneIntent = Intent(ACTION_REPLAY_DONE).apply {
@@ -249,6 +320,8 @@ class FlowReplayService : AccessibilityService() {
             val desc = if (step.isAuthPause) step.description else "Sensitive payment or authentication screen detected"
             Log.i(TAG, "🔒 [T11 Credential Boundary] AUTH PAUSE triggered on step ${step.stepIndex}: $desc")
             showAuthPauseNotification(desc)
+            FeedbackManager.vibrateAuthWarning()
+            FeedbackManager.speak("Security checkpoint. Please confirm payment or authentication.")
 
             val authIntent = Intent(ACTION_AUTH_PAUSE).apply {
                 putExtra(EXTRA_STEP_DESC, desc)
@@ -281,6 +354,47 @@ class FlowReplayService : AccessibilityService() {
             delay(1500)
         }
 
+        // Bonus 3: Mid-Flow Dynamic Parameter Clarification Gate
+        val paramSlot = step.parameterSlot
+        val effectiveParams = params.toMutableMap()
+        if (paramSlot != null && effectiveParams[paramSlot].isNullOrBlank() && step.defaultValue.isNullOrBlank()) {
+            val promptMsg = "Please provide value for $paramSlot"
+            Log.i(TAG, "❓ [Bonus 3 Mid-Flow Clarification] $promptMsg")
+            FeedbackManager.vibrateAlert()
+            FeedbackManager.speak(promptMsg)
+
+            val paramIntent = Intent(ACTION_PARAM_NEEDED).apply {
+                putExtra(EXTRA_PARAM_NAME, paramSlot)
+                putExtra(EXTRA_STEP_DESC, step.description)
+                putExtra(EXTRA_FLOW_NAME, flow.flowName)
+                putExtra(EXTRA_STEP_INDEX, step.stepIndex)
+                setPackage(packageName)
+            }
+            sendBroadcast(paramIntent)
+
+            val deferred = CompletableDeferred<String>()
+            paramDeferred = deferred
+
+            val clarified = try {
+                withTimeout(45000L) {
+                    deferred.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "Mid-flow parameter input timed out after 45s")
+                null
+            } finally {
+                paramDeferred = null
+            }
+
+            if (!clarified.isNullOrBlank()) {
+                effectiveParams[paramSlot] = clarified
+                Log.i(TAG, "Clarified parameter '$paramSlot' = '$clarified'")
+            } else {
+                Log.w(TAG, "Missing parameter for $paramSlot, halting step.")
+                return false
+            }
+        }
+
         return when (step.actionType) {
             "open_app" -> {
                 val launchIntent = packageManager.getLaunchIntentForPackage(flow.targetAppPackage)
@@ -301,10 +415,10 @@ class FlowReplayService : AccessibilityService() {
                     }
                 }
             }
-            "click" -> performClick(step, params)
-            "type" -> performType(step, params)
+            "click" -> performClick(step, effectiveParams)
+            "type" -> performType(step, effectiveParams)
             "scroll" -> performScroll(step)
-            "long_press" -> performClick(step, params)
+            "long_press" -> performClick(step, effectiveParams)
             "wait" -> {
                 delay(step.waitAfterMs.toLong())
                 true
@@ -398,26 +512,8 @@ class FlowReplayService : AccessibilityService() {
 
         // T5: Dynamic Quantity Slot handling
         val qty = params["quantity"]?.toIntOrNull() ?: 1
-        val isAddAction = step.description.contains("add", ignoreCase = true) ||
-                          step.selector["text_contains"]?.contains("add", ignoreCase = true) == true
-
-        if (clicked && qty > 1 && isAddAction) {
-            for (q in 2..qty) {
-                delay(800)
-                rootInActiveWindow?.let { root ->
-                    val plusNode = findNodeRecursive(root) { n ->
-                        val t = n.text?.toString() ?: ""
-                        val d = n.contentDescription?.toString() ?: ""
-                        (t == "+" || d.contains("increase", ignoreCase = true) || d.contains("add", ignoreCase = true))
-                    }
-                    if (plusNode != null) {
-                        plusNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) || dispatchTapGesture(plusNode)
-                        plusNode.recycle()
-                        Log.i(TAG, "  ➕ [T5 Quantity] Incremented quantity ($q/$qty)")
-                    }
-                    root.recycle()
-                }
-            }
+        if (clicked && qty > 1) {
+            handleQuantityIncrement(qty, step)
         }
 
         return clicked
@@ -459,6 +555,40 @@ class FlowReplayService : AccessibilityService() {
         val dispatched = dispatchGesture(gesture, null, null)
         Log.d(TAG, "  👆 Long press gesture at ($x, $y) for 500ms -> $dispatched")
         return dispatched
+    }
+
+    private suspend fun handleQuantityIncrement(targetQty: Int, baseStep: FlowStep) {
+        val isAddOrCart = baseStep.parameterSlot == "quantity" ||
+                baseStep.description.contains("add", ignoreCase = true) ||
+                baseStep.description.contains("cart", ignoreCase = true) ||
+                baseStep.description.contains("item", ignoreCase = true) ||
+                baseStep.selector["text_contains"]?.contains("add", ignoreCase = true) == true ||
+                baseStep.selector["text_contains"]?.contains("cart", ignoreCase = true) == true
+
+        if (!isAddOrCart) return
+
+        Log.i(TAG, "➕ [T5 Quantity] Attempting to increment quantity to $targetQty")
+        for (q in 2..targetQty) {
+            delay(1000)
+            val root = rootInActiveWindow ?: break
+            val plusNode = findNodeRecursive(root) { n ->
+                val t = (n.text?.toString() ?: "").trim()
+                val d = (n.contentDescription?.toString() ?: "").trim().lowercase()
+                val id = (n.viewIdResourceName ?: "").lowercase()
+                (t == "+" || d.contains("increase") || d.contains("add") || d.contains("increment") || id.contains("plus") || id.contains("increment") || id.contains("add_btn"))
+            }
+
+            if (plusNode != null) {
+                val ok = plusNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+                        (plusNode.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
+                        dispatchTapGesture(plusNode)
+                plusNode.recycle()
+                Log.i(TAG, "  ➕ [T5 Quantity] Step ($q/$targetQty) increment success: $ok")
+            } else {
+                Log.w(TAG, "  ⚠️ [T5 Quantity] Stepper (+) not found for count $q/$targetQty")
+                break
+            }
+        }
     }
     private suspend fun performType(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
@@ -536,14 +666,22 @@ class FlowReplayService : AccessibilityService() {
     }
 
     // ─────────────────────────────────────────────
-    // Semantic Element Finder (Cascading Fallback + Pop-up Dismissal)
+    // Semantic Element Finder (Cascading Fallback + Pop-up Dismissal + Progressive Recovery)
     // ─────────────────────────────────────────────
 
-    private suspend fun findElementWithRetry(selector: Map<String, String>, maxRetries: Int = 6): AccessibilityNodeInfo? {
+    private suspend fun findElementWithRetry(selector: Map<String, String>, maxRetries: Int = 8): AccessibilityNodeInfo? {
+        val startTime = System.currentTimeMillis()
+        val maxDurationMs = 25000L // 25s progressive recovery window
+
         for (attempt in 1..maxRetries) {
+            if (System.currentTimeMillis() - startTime > maxDurationMs) {
+                Log.w(TAG, "  ⏱️ [T10] Exceeded 25s search window without finding element.")
+                break
+            }
+
             val root = rootInActiveWindow
             if (root == null) {
-                delay(800)
+                delay(1000)
                 continue
             }
             val node = findElement(root, selector)
@@ -553,26 +691,47 @@ class FlowReplayService : AccessibilityService() {
             Log.d(TAG, "  🔍 Element not found (attempt $attempt/$maxRetries)")
 
             // T7: Check for unexpected promo pop-ups / overlays obstructing the view
-            if (attempt in 2..3) {
+            if (attempt in 1..3) {
                 rootInActiveWindow?.let { r ->
                     val dismissed = dismissUnexpectedOverlay(r)
                     if (dismissed) {
                         Log.i(TAG, "  🎉 [T7 Screen Change] Unexpected overlay/pop-up dismissed! Retrying element search...")
                         delay(1000)
+                        rootInActiveWindow?.let { newRoot ->
+                            val retryNode = findElement(newRoot, selector)
+                            if (retryNode != null) return retryNode
+                            newRoot.recycle()
+                        }
                     }
                     r.recycle()
                 }
             }
 
-            delay(800)
-
-            // On later retries, try scrolling to bring element into view
-            if (attempt == maxRetries - 2 || attempt == maxRetries - 1) {
+            // Progressive scroll recovery:
+            // Attempts 3-4: Scroll forward (down) to bring lower elements into viewport
+            // Attempts 5-6: Scroll backward (up) in case element was above viewport
+            if (attempt in 3..4) {
                 rootInActiveWindow?.let { r ->
-                    findScrollableNode(r)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                    Log.d(TAG, "  📜 Scrolling down to look for element (attempt $attempt)")
+                    findScrollableNode(r)?.let { scrollable ->
+                        scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                        scrollable.recycle()
+                    }
                     r.recycle()
-                    delay(800)
+                    delay(1000)
                 }
+            } else if (attempt in 5..6) {
+                rootInActiveWindow?.let { r ->
+                    Log.d(TAG, "  📜 Scrolling up to look for element (attempt $attempt)")
+                    findScrollableNode(r)?.let { scrollable ->
+                        scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+                        scrollable.recycle()
+                    }
+                    r.recycle()
+                    delay(1000)
+                }
+            } else {
+                delay(1000)
             }
         }
         return null

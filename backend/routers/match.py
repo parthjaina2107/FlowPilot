@@ -41,22 +41,38 @@ async def _resolve_match(command: str) -> MatchResult:
     params = await extract_parameters(command, flow_graph.parameter_schema)
     params = {str(k): str(v) for k, v in params.items()}
 
-    # T13: Ambiguity Resolution
-    # If the user speaks a broad/ambiguous command like "Order pizza", or if two flows match closely,
-    # prompt the user for confirmation rather than guessing silently.
+    # T13: Ambiguity Resolution (multi-candidate conflict, under-specified commands, or borderline confidence)
     is_ambiguous = False
     clarification_prompt = None
     ambiguity_options = None
 
-    words = [w for w in cmd_lower.split() if w not in {"a", "an", "the", "please", "can", "you", "to", "for"}]
+    # Condition 1: Multiple matching flows with close confidence scores
     if len(candidates) > 1 and (candidates[0]["confidence"] - candidates[1]["confidence"] < 0.08):
         is_ambiguous = True
         ambiguity_options = [c["flow_name"] for c in candidates[:3]]
         clarification_prompt = f"Did you mean '{candidates[0]['flow_name']}' or '{candidates[1]['flow_name']}'?"
-    elif len(words) <= 2 and any(k in cmd_lower for k in ["pizza", "food", "order", "search", "play"]):
+
+    # Condition 2: Borderline / moderate confidence (< 0.75 threshold)
+    elif best["confidence"] < 0.75:
         is_ambiguous = True
-        ambiguity_options = [candidates[0]["flow_name"], "Record new flow"]
-        clarification_prompt = f"Found '{candidates[0]['flow_name']}'. Confirm to proceed or record a new flow."
+        ambiguity_options = [f"Yes, run {best['flow_name']}", "No, cancel"]
+        clarification_prompt = f"Found '{best['flow_name']}' with {int(best['confidence'] * 100)}% confidence. Confirm to proceed?"
+
+    # Condition 3: Under-specified command where schema has required parameters but command is generic
+    elif flow_graph.parameter_schema:
+        content_words = [w for w in cmd_lower.split() if w not in {"a", "an", "the", "please", "can", "you", "to", "for", "on", "in", "from", "and"}]
+        unmentioned_params = []
+        for param_name, schema in flow_graph.parameter_schema.items():
+            default_val = str(schema.get("default", "")).lower()
+            val = str(params.get(param_name, "")).lower()
+            if val and val == default_val and val not in cmd_lower:
+                unmentioned_params.append(param_name)
+
+        if len(content_words) <= 2 and unmentioned_params:
+            is_ambiguous = True
+            first_missing = unmentioned_params[0].replace('_', ' ')
+            ambiguity_options = [f"Use default ({params.get(unmentioned_params[0])})", "Clarify parameter", "Record new flow"]
+            clarification_prompt = f"Matched '{best['flow_name']}'. What {first_missing} would you like?"
 
     return MatchResult(
         matched=True,

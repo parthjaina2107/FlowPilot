@@ -59,18 +59,27 @@ This document provides a direct, comprehensive compliance matrix against every s
 ## 4. Bonus Points Capabilities (+10 Points)
 
 ### 🌟 Bonus 1: Irrelevant / Accidental Touch Detection & Pruning (+3 Points)
-- **Problem**: When a user is demonstrating a flow, they may accidentally tap the wrong area, receive a notification, or answer a phone call.
-- **FlowPilot Solution**: The Flow Compiler analyzes the recording trace and filters out:
-  1. *Out-of-target package actions*: Touches that occur inside system dialer, phone app, or notification shades are flagged and discarded.
-  2. *Idempotent back-tracks*: If a user opens a menu and immediately closes it without performing an action, the detour is pruned from the compiled `FlowGraph`.
+- **Problem**: When a user demonstrates a flow, they may accidentally double-tap, tap empty background layout space, receive a phone notification, or tap and immediately backtrack.
+- **FlowPilot Solution**: Implemented directly in `FlowRecorderService.kt` (`pruneRecordedActions`):
+  1. *Out-of-target package filtering*: Discards touches in system UI, launchers, dialer, or incoming call overlays (`IGNORED_PACKAGES`).
+  2. *Rapid duplicate click suppression*: Drops accidental jitter and double-taps on the same element occurring within 300ms.
+  3. *Empty layout noise elimination*: Filters out non-actionable touches on generic layout wrappers without text, content descriptions, or IDs.
+  4. *Backtrack / cancel pruning*: Detects when an action is followed within 2 seconds by a "cancel", "back", or "close" tap, pruning the aborted detour from the trace.
 
-### 🌟 Bonus 2: Cross-App & Similar UI Generalization (+4 Points)
+### 🌟 Bonus 2: Cross-App & Similar UI Generalization — Architectural Blueprint (ASIG) (+4 Points)
 - **Problem**: A flow learned on Amazon should ideally generalize to other e-commerce apps like Myntra or Flipkart without re-teaching everything from scratch.
-- **FlowPilot Solution**: FlowPilot represents compiled flows using an **Abstract Semantic Intent Graph (ASIG)**. A step like `SearchProduct` is mapped to generic semantic intents (`SEARCH_BAR_INPUT`, `FIRST_PRODUCT_CARD_CLICK`, `ADD_TO_CART_BUTTON_CLICK`). When executed on a partner app, the cascading element finder looks for equivalent semantic targets.
+- **FlowPilot Solution**: FlowPilot designs an **Abstract Semantic Intent Graph (ASIG)** architecture:
+  1. *Semantic Intent Abstraction*: Steps like `SearchProduct` are represented as abstracted semantic intents (`role: edittext, search intent`, `action: click, cart intent`) rather than hardcoded proprietary selectors.
+  2. *Resilient Element Resolution*: FlowPilot's 4-tier cascading selector fallback (`role`, `text_contains`, `content_description`) allows flows to execute across interface updates and sister app layouts.
+  3. *Cross-Package Research Roadmap*: Cross-app execution across distinct packages is documented as an offline role-mapping specification utilizing LLM re-anchoring.
 
-### 🌟 Bonus 3: Mid-Flow Parameter Clarification (+3 Points)
-- **Problem**: If the user provides an underspecified command (e.g. *"Order pizza on Zomato"*), existing systems either guess wrong or crash.
-- **FlowPilot Solution**: The Intent Matcher detects that the `restaurant` slot is unbound. Instead of guessing or failing silently, FlowPilot initiates an interactive prompt: *"Which restaurant would you like to order from?"*, binds the user's spoken answer to the slot, and proceeds with execution.
+### 🌟 Bonus 3: Mid-Flow Dynamic Parameter Clarification (+3 Points)
+- **Problem**: If a flow requires a parameter (such as a specific delivery address, query, or option) that was not supplied in the initial voice command or needs on-the-fly clarification, traditional automation engines either guess or crash.
+- **FlowPilot Solution**: Implemented in `FlowReplayService.kt` and `MainActivity.kt`:
+  1. *Execution Gate*: When `FlowReplayService` reaches a step with an unresolved `parameterSlot`, it halts execution and suspends using a coroutine `CompletableDeferred`.
+  2. *Voice & Haptic Alert*: Emits an alert vibration pattern and speaks the parameter request via `FeedbackManager.speak("Please specify <param>")`.
+  3. *Interactive Clarification Dialog*: Broadcasts `ACTION_PARAM_NEEDED`; `MainActivity` presents an immediate interactive Compose input dialog.
+  4. *Seamless Continuation*: Once submitted via `ACTION_PARAM_PROVIDED`, the parameter is dynamically bound into selectors/text input and replay resumes without restarting.
 
 ---
 

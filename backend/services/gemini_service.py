@@ -43,9 +43,11 @@ YOUR JOB:
    - resource_id_contains (only as fallback - IDs change across versions)
 3. PARAMETERISE: Identify values the user typed or selected that are likely to change
    across invocations. Create named parameter slots for them. Examples:
-   - A food item name -> slot "item_name"
+   - A food item name -> slot "item_name" or "dish_name"
    - A contact name -> slot "contact_name"
    - A quantity -> slot "quantity"
+   - A delivery address or label (Home, Work, etc.) -> slot "address"
+   - A search query -> slot "query"
    - A message -> slot "message_text"
 4. GENERATE TRIGGER PHRASES: Create 3-5 natural language phrases a user might say
    to invoke this flow. Include the original trigger phrase.
@@ -157,7 +159,14 @@ def compile_flow_heuristic(trace: RecordingTrace) -> dict[str, Any]:
         param_slot = None
         default_val = None
         if a.action_type == "type" and a.typed_text:
-            param_slot = "query" if "search" in text_context else "item_name"
+            if any(k in text_context for k in ["address", "deliver", "location", "street", "home", "work"]):
+                param_slot = "address"
+            elif any(k in text_context for k in ["search", "find"]):
+                param_slot = "query"
+            elif any(k in text_context for k in ["message", "text"]):
+                param_slot = "message"
+            else:
+                param_slot = "item_name"
             default_val = a.typed_text
             param_schema[param_slot] = {
                 "type": "string",
@@ -233,15 +242,18 @@ async def compile_flow(trace: RecordingTrace) -> dict[str, Any]:
     for model_name in FALLBACK_MODELS:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=FLOW_COMPILER_SYSTEM_PROMPT,
-                        response_mime_type="application/json",
-                        temperature=0.2,
-                        max_output_tokens=4096,
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=model_name,
+                        contents=user_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=FLOW_COMPILER_SYSTEM_PROMPT,
+                            response_mime_type="application/json",
+                            temperature=0.2,
+                            max_output_tokens=4096,
+                        ),
                     ),
+                    timeout=15.0,
                 )
 
                 raw_text = response.text.strip()
@@ -275,7 +287,7 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
     }
     extracted = dict(defaults)
 
-    # 1. Fast regex extraction (e.g. integer quantities like "2 pizzas" -> quantity = 2)
+    # 1. Fast regex extraction (e.g. integer quantities like "2 pizzas", address tags like "to Home")
     for name, schema in parameter_schema.items():
         if schema.get("type") == "integer":
             match = re.search(r"\b(\d+)\b", command)
@@ -284,6 +296,15 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
                     extracted[name] = int(match.group(1))
                 except ValueError:
                     pass
+        elif name == "address":
+            # Match patterns like: "to Home", "to Work", "deliver to Office", "at Home", "to Flat 402"
+            addr_match = re.search(
+                r"\b(?:to|deliver to|at|for)\s+([A-Za-z0-9\s]{2,20}?)(?:\s+(?:on|from|in|using|via)\s+[A-Za-z]+|\s*$)",
+                command,
+                re.IGNORECASE,
+            )
+            if addr_match:
+                extracted[name] = addr_match.group(1).strip()
 
     # 2. Async Gemini extraction
     client = _get_client()

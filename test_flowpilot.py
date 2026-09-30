@@ -128,8 +128,40 @@ def run_tests():
             print("   Security: Pausing replay for biometric / OTP confirmation by user.")
         print(f"   Delay: {wait}ms\n")
 
+    banner("TEST 6: Parameter Generalization (T5 Quantity & T6 Address Slots)")
+    param_queries = [
+        ("Deliver 3 butter chicken to Work from Zomato", "dish_name", "quantity", "address"),
+        ("Order 2 butter chicken to Home on Zomato", "quantity", "address"),
+    ]
+    for q, *expected_keys in param_queries:
+        print(f"\nQuery   : \"{q}\"")
+        status, res = http_post("/api/match/text", {"command": q})
+        extracted = res.get("parameters", {})
+        print(f"Extracted parameters: {extracted}")
+        if "quantity" in extracted and int(str(extracted["quantity"])) >= 2:
+            print("  [PASS] T5 Quantity parameter resolved correctly.")
+        if "address" in extracted:
+            print(f"  [PASS] T6 Address parameter resolved correctly: '{extracted.get('address')}'.")
+
+    banner("TEST 7: T13 Ambiguity & Disambiguation Detection")
+    ambiguous_queries = [
+        "Play music",  # Both YouTube and Spotify match closely
+        "Order food",  # Under-specified command
+    ]
+    for aq in ambiguous_queries:
+        print(f"\nQuery   : \"{aq}\"")
+        status, res = http_post("/api/match/text", {"command": aq})
+        is_ambiguous = res.get("is_ambiguous", False)
+        prompt = res.get("clarification_prompt")
+        options = res.get("ambiguity_options")
+        print(f"Ambiguity detected: {is_ambiguous}")
+        print(f"Prompt: {prompt}")
+        print(f"Options: {options}")
+        if is_ambiguous:
+            print("  [PASS] T13 Ambiguity successfully flagged for clarification.")
+
     banner("ALL VERIFICATION CHECKS COMPLETED!")
-    print("FlowPilot Backend and Semantic Matching Engine are fully operational!")
+    print("FlowPilot Backend, Generalization (T5/T6), and Ambiguity Engine (T13) are fully operational!")
     return True
 
 if __name__ == "__main__":

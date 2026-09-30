@@ -15,6 +15,7 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
+import com.flowpilot.util.FeedbackManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -171,6 +172,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var ambiguityOptions by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingAmbiguousMatch by remember { mutableStateOf<MatchResult?>(null) }
 
+    // Mid-Flow Parameter Clarification State (Bonus 3)
+    var showParamNeededDialog by remember { mutableStateOf(false) }
+    var neededParamName by remember { mutableStateOf("") }
+    var neededParamStepDesc by remember { mutableStateOf("") }
+    var neededParamFlowName by remember { mutableStateOf("") }
+    var inputParamValue by remember { mutableStateOf("") }
+
     // Server Config Dialog State
     var showServerConfigDialog by remember { mutableStateOf(false) }
     var serverUrlInput by remember { mutableStateOf(ApiClient.getBaseUrl()) }
@@ -295,6 +303,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         }
                         statusMessage = report
                         speak(report)
+                        FeedbackManager.speak(report)
                         return
                     }
 
@@ -318,12 +327,14 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                     pendingAmbiguousMatch = res
                                     showAmbiguityDialog = true
                                     speak(prompt)
+                                    FeedbackManager.speak(prompt)
                                     return@launch
                                 }
 
                                 voiceState = VoiceState.MATCHED
                                 statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
-                                speak("Starting ${res.flowName}")
+                                speak("Executing ${res.flowName}")
+                                FeedbackManager.speak("Executing ${res.flowName}")
 
                                 delay(1000)
 
@@ -354,12 +365,14 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 val msg = res.suggestion ?: "No matching flow found. Record a new flow first!"
                                 statusMessage = msg
                                 speak(msg)
+                                FeedbackManager.speak(msg)
                             }
                         } catch (e: Exception) {
                             Log.e("FlowPilot", "Match error", e)
                             voiceState = VoiceState.ERROR
                             statusMessage = "Failed to reach backend: ${e.localizedMessage}"
-                            speak("Could not connect to automation backend.")
+                            speak("Could not reach backend server.")
+                            FeedbackManager.speak("Could not reach backend server.")
                         }
                     }
                 } else {
@@ -415,6 +428,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         showStuckDialog = true
                         speak("Automation stopped. $stuckReason")
                     }
+                    FlowReplayService.ACTION_PARAM_NEEDED -> {
+                        neededParamName = intent.getStringExtra(FlowReplayService.EXTRA_PARAM_NAME) ?: "parameter"
+                        neededParamStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: ""
+                        neededParamFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
+                        inputParamValue = ""
+                        showParamNeededDialog = true
+                    }
                 }
             }
         }
@@ -424,6 +444,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             addAction(FlowReplayService.ACTION_AUTH_PAUSE)
             addAction(FlowReplayService.ACTION_REPLAY_DONE)
             addAction(FlowReplayService.ACTION_REPLAY_STUCK)
+            addAction(FlowReplayService.ACTION_PARAM_NEEDED)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -918,6 +939,77 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     }
                 ) {
                     Text("Cancel")
+                }
+            },
+            containerColor = CardBg,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Bonus 3: Mid-Flow Dynamic Parameter Clarification Dialog
+    if (showParamNeededDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showParamNeededDialog = false
+                val intent = Intent(context, FlowReplayService::class.java).apply {
+                    action = FlowReplayService.ACTION_PARAM_PROVIDED
+                    putExtra(FlowReplayService.EXTRA_PARAM_VALUE, "")
+                }
+                context.startService(intent)
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Edit, contentDescription = null, tint = SamsungLightBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Parameter Needed", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "Flow '$neededParamFlowName' needs '$neededParamName' to continue with '$neededParamStepDesc':",
+                        color = TextPrimary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = inputParamValue,
+                        onValueChange = { inputParamValue = it },
+                        label = { Text("Enter $neededParamName") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showParamNeededDialog = false
+                        val intent = Intent(context, FlowReplayService::class.java).apply {
+                            action = FlowReplayService.ACTION_PARAM_PROVIDED
+                            putExtra(FlowReplayService.EXTRA_PARAM_VALUE, inputParamValue)
+                        }
+                        context.startService(intent)
+                        inputParamValue = ""
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue)
+                ) {
+                    Text("Submit")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        showParamNeededDialog = false
+                        val intent = Intent(context, FlowReplayService::class.java).apply {
+                            action = FlowReplayService.ACTION_PARAM_PROVIDED
+                            putExtra(FlowReplayService.EXTRA_PARAM_VALUE, "")
+                        }
+                        context.startService(intent)
+                        inputParamValue = ""
+                    }
+                ) {
+                    Text("Skip / Cancel")
                 }
             },
             containerColor = CardBg,
