@@ -20,6 +20,8 @@
 
 ## 2. Official 5-Minute Unedited Demonstration Script
 
+> **Video Link**: 🔗 **[Official Demo Video on Google Drive](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)**
+
 In strict accordance with the **Samsung PRISM Theme 3 Submission Guidelines**, the evaluation video demonstrates the following 5 parts, unedited and in exact order:
 
 ```

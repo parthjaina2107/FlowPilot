@@ -34,7 +34,7 @@ Every requirement specified in the **Samsung PRISM Theme 3 Guidelines** is fulfi
 | Deliverable | Description | Direct Access Link |
 | :--- | :--- | :--- |
 | 📦 **Installable APK** | Pre-compiled, installable Android debug APK ready for evaluation | **[FlowPilot-v1.0-debug.apk](FlowPilot-v1.0-debug.apk)** |
-| 🎬 **Demo Video (≤ 5 min)** | Official 5-part unedited video (Teach, Exact Replay, Paraphrase, Slot Variation, Stuck Query) | **[Watch Official Demo (YouTube / Drive)](docs/HACKATHON_PITCH.md#2-official-5-minute-unedited-demonstration-script)** |
+| 🎬 **Demo Video (≤ 5 min)** | Official 5-part unedited video (Teach, Exact Replay, Paraphrase, Slot Variation, Stuck Query) | **[Watch Official Demo Video (Google Drive)](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)** |
 | 📊 **Official Pitch Deck** | Official submission presentation file (`CollegeName_TeamName_Submission_ppt`) | **[SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx](SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)** |
 | 📋 **Evaluation Compliance** | Point-by-point compliance against test cases T1–T14 and bonus points | **[docs/EVALUATION_CRITERIA.md](docs/EVALUATION_CRITERIA.md)** |
 | 📝 **AI Usage Disclosure** | Official LangAI 3.0 AI Usage Disclosure & Compliance Form | **[AI_DISCLOSURE.md](AI_DISCLOSURE.md)** |
@@ -224,6 +224,8 @@ This verifies:
 ---
 
 ## 🎬 5-Minute Live Demonstration Flow
+
+> **Official Demo Video**: 🔗 **[Watch on Google Drive (SRMUniversity_Cheesecake_FlowPilot_Demo)](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)**
 
 The live demo and submission video follow the exact unedited 5-step sequence required by the Samsung PRISM jury:
 

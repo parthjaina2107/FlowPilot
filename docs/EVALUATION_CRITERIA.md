@@ -14,7 +14,7 @@ This document provides a direct, comprehensive compliance matrix against every s
 | :--- | :--- | :--- | :---: |
 | **Installable APK** | Pre-built debug APK ready for testing | Pre-built `FlowPilot-v1.0-debug.apk` in repository root & release assets | ✅ **Passed** |
 | **Source Code Repository** | Public GitHub repo with reproducible setup | Public repository at `https://github.com/parthjaina2107/FlowPilot` | ✅ **Passed** |
-| **Demo Video (≤ 5 min)** | Must show unedited in order: (a) teach flow, (b) exact replay, (c) paraphrase, (d) changed slot, (e) assistant asking when stuck | Full demo script & timestamps mapped out in [docs/HACKATHON_PITCH.md](HACKATHON_PITCH.md#2-5-minute-official-demonstration-script) | 🎬 **Ready** |
+| **Demo Video (≤ 5 min)** | Must show unedited in order: (a) teach flow, (b) exact replay, (c) paraphrase, (d) changed slot, (e) assistant asking when stuck | **[Official Demo Video (Google Drive)](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)** | 🎬 **Ready** |
 | **Architecture** | Speech-to-intent, UI-tree capture, generalisation, slot extraction, replay | Comprehensive technical deep dive with ASCII/Mermaid flowcharts in [docs/ARCHITECTURE.md](ARCHITECTURE.md) | ✅ **Passed** |
 | **Target Apps Declaration** | Declared list of 3rd-party apps tested | **5 Apps**: Zomato (Food), Amazon (E-Commerce), YouTube (Video), Spotify (Audio), WhatsApp (Messaging) | ✅ **Passed** |
 | **Known Limitations** | Documented edge cases & system boundaries | Declared in [Section 5 below](#5-known-limitations) | ✅ **Passed** |
