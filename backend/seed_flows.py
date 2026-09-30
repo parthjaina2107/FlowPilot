@@ -65,10 +65,10 @@ SAMPLE_FLOWS = [
             "query": {"type": "string", "description": "Search term or song title", "default": "lofi hip hop"}
         },
         steps=[
-            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.google.android.youtube"}, description="Open YouTube", wait_after_ms=2000),
-            FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search icon", wait_after_ms=800),
-            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search YouTube"}, parameter_slot="query", default_value="lofi hip hop", description="Type video title", wait_after_ms=1500),
-            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "lofi"}, description="Tap first search result", wait_after_ms=2000)
+            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.google.android.youtube"}, description="Open YouTube", wait_after_ms=2500),
+            FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search icon", wait_after_ms=1200),
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search YouTube"}, parameter_slot="query", default_value="lofi hip hop", description="Type video title", wait_after_ms=2500),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "content_description_contains": "play video"}, description="Tap video to play", wait_after_ms=3000)
         ],
         created_at="2026-09-29T10:05:00Z",
         version=1

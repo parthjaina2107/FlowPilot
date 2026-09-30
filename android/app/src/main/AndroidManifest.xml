@@ -9,6 +9,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.whatsapp" />
+        <package android:name="in.amazon.mShop.android.shopping" />
+        <package android:name="com.application.zomato" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
 
     <application
         android:name=".FlowPilotApp"
@@ -19,6 +31,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.FlowPilot"
         android:usesCleartextTraffic="true"
+        android:enableOnBackInvokedCallback="true"
         tools:targetApi="35">
 
         <!-- Main Activity -->

@@ -402,20 +402,34 @@ class FlowReplayService : AccessibilityService() {
 
         return when (step.actionType) {
             "open_app" -> {
-                val launchIntent = packageManager.getLaunchIntentForPackage(flow.targetAppPackage)
-                if (launchIntent != null) {
+                var launchIntent = packageManager.getLaunchIntentForPackage(flow.targetAppPackage)
+                if (launchIntent == null) {
+                    launchIntent = Intent(Intent.ACTION_MAIN).apply {
+                        addCategory(Intent.CATEGORY_LAUNCHER)
+                        `package` = flow.targetAppPackage
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                }
+                var launched = false
+                try {
                     launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     startActivity(launchIntent)
                     delay(3000) // Wait for app to load
+                    launched = true
+                } catch (e: Exception) {
+                    Log.w(TAG, "  ⚠️ Cannot launch package ${flow.targetAppPackage} via intent: ${e.message}")
+                }
+                if (launched) {
                     true
                 } else {
-                    Log.w(TAG, "  ⚠️ Package ${flow.targetAppPackage} not installed. Checking if already on active screen...")
+                    Log.w(TAG, "  ⚠️ Checking if ${flow.targetAppPackage} is already on active screen...")
                     val currentRoot = rootInActiveWindow
-                    if (currentRoot != null) {
+                    if (currentRoot != null && currentRoot.packageName == flow.targetAppPackage) {
                         currentRoot.recycle()
                         true
                     } else {
-                        Log.e(TAG, "  ❌ Cannot launch package ${flow.targetAppPackage}")
+                        currentRoot?.recycle()
+                        Log.e(TAG, "  ❌ Cannot launch package ${flow.targetAppPackage} and not active on screen")
                         false
                     }
                 }
@@ -527,12 +541,27 @@ class FlowReplayService : AccessibilityService() {
         val resolvedSelector = resolveSelector(step.selector, step, params)
         val node = findElementWithRetry(resolvedSelector) ?: return false
 
-        var clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        val className = node.className?.toString()?.lowercase() ?: ""
+        val isContainerOrCustom = className.contains("viewgroup") ||
+                className.contains("linearlayout") ||
+                className.contains("framelayout") ||
+                className.contains("relativelayout") ||
+                className.contains("recyclerview") ||
+                className.contains("compose") ||
+                (node.isClickable && className.contains("view"))
+
+        var clicked = false
+        if (isContainerOrCustom) {
+            clicked = dispatchTapGesture(node)
+        }
+        if (!clicked) {
+            clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
         if (!clicked) {
             // Fallback 1: Try clicking parent or clickable ancestor
             val ancestor = findClickableAncestor(node)
             if (ancestor != null) {
-                clicked = ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                clicked = dispatchTapGesture(ancestor) || ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 ancestor.recycle()
             }
         }
@@ -659,6 +688,9 @@ class FlowReplayService : AccessibilityService() {
             } catch (e: Exception) {
                 Log.w(TAG, "Clipboard paste fallback error: ${e.message}")
             }
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
         }
         node.recycle()
 
@@ -807,9 +839,31 @@ class FlowReplayService : AccessibilityService() {
         val descContains = selector["content_description_contains"]
         val idContains = selector["resource_id_contains"]
 
+        val isSearchIcon = descContains?.contains("Search", ignoreCase = true) == true
+        val isInputOrToolbar = { node: AccessibilityNodeInfo ->
+            val cls = node.className?.toString()?.lowercase() ?: ""
+            val id = (node.viewIdResourceName ?: "").lowercase()
+            val isInput = node.isEditable ||
+                    node.isFocused ||
+                    cls.contains("edit") ||
+                    cls.contains("textinput") ||
+                    cls.contains("autocompletetextview") ||
+                    id.contains("search_edit") ||
+                    id.contains("search_box")
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            val inTopBar = rect.centerY() in 1..195 && rect.height() in 1..160
+            isInput || inTopBar
+        }
+
         // Level 1: Exact match (all specified criteria)
         findNodeRecursive(root) { node ->
-            matchesRole(node, role) &&
+            val skipAsToolbar = if (role != null && !role.equals("edittext", ignoreCase = true) && !isSearchIcon) {
+                isInputOrToolbar(node)
+            } else false
+            val roleMatches = if (skipAsToolbar) false else matchesRole(node, role)
+
+            roleMatches &&
             matchesText(node, textContains, textEquals) &&
             matchesDescription(node, descContains) &&
             matchesId(node, idContains)
@@ -818,7 +872,11 @@ class FlowReplayService : AccessibilityService() {
         // Level 2: Relaxed text (role + text_contains only)
         if (textContains != null || textEquals != null) {
             findNodeRecursive(root) { node ->
-                matchesRole(node, role) && matchesText(node, textContains, textEquals)
+                val skipAsToolbar = if (role != null && !role.equals("edittext", ignoreCase = true) && !isSearchIcon) {
+                    isInputOrToolbar(node)
+                } else false
+                val roleMatches = if (skipAsToolbar) false else matchesRole(node, role)
+                roleMatches && matchesText(node, textContains, textEquals)
             }?.let {
                 Log.d(TAG, "  ⚡ Level 2 fallback match: role=$role, text=$textContains")
                 return it
@@ -828,7 +886,9 @@ class FlowReplayService : AccessibilityService() {
         // Level 3: Text only (ignore role)
         if (textContains != null || textEquals != null) {
             findNodeRecursive(root) { node ->
-                matchesText(node, textContains, textEquals)
+                val skipAsToolbar = if (!isSearchIcon) isInputOrToolbar(node) else false
+                val allowNode = !skipAsToolbar
+                allowNode && matchesText(node, textContains, textEquals)
             }?.let {
                 Log.d(TAG, "  ⚡ Level 3 fallback match: text=$textContains")
                 return it
@@ -885,9 +945,11 @@ class FlowReplayService : AccessibilityService() {
 
         return when (roleLower) {
             "button" -> node.isClickable || cls.contains("imageview") || cls.contains("card")
-            "edittext" -> node.isEditable || cls.contains("edit") || cls.contains("textinput")
-            "textview" -> node.text != null || cls.contains("text")
-            else -> true
+            "edittext" -> node.isEditable || cls.contains("edit") || cls.contains("textinput") || cls.contains("autocompletetextview")
+            "textview" -> !node.isEditable && (node.text != null || cls.contains("text"))
+            "viewgroup", "layout" -> cls.contains("layout") || cls.contains("group") || cls.contains("recycler") || cls.contains("view")
+            "imageview", "icon" -> cls.contains("image") || cls.contains("icon")
+            else -> cls.contains(roleLower)
         }
     }
 
