@@ -71,7 +71,7 @@
 
 ## 6. Declaration & Sign-Off
 
-- **Name of Team Representative**: Parth Jaina
+- **Name of Team Representative**: Sanjeev Aryan
 - **Role**: Team Lead / AI & Systems Developer
 - **Institution**: SRM Institute of Science and Technology, Kattankulathur
 - **Date**: September 30, 2026
