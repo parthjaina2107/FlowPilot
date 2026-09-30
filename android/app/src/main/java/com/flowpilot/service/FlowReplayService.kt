@@ -1,8 +1,11 @@
 package com.flowpilot.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.app.PendingIntent
 import android.content.Intent
+import android.graphics.Path
+import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -19,13 +22,16 @@ import kotlinx.serialization.json.Json
  * FlowReplayService — REPLAY stage
  *
  * Executes a FlowGraph by finding UI elements using semantic selectors
- * and performing actions (click, type, scroll) via AccessibilityService.
+ * and performing actions (click, type, scroll, gesture dispatch) via AccessibilityService.
  *
- * Uses a CASCADING FALLBACK strategy for element matching:
- * 1. Exact match (all selector fields)
- * 2. Relaxed text (role + text_contains)
- * 3. Relaxed role (text only)
- * 4. Content description match
+ * Features:
+ * 1. CASCADING FALLBACK strategy for element matching
+ * 2. Overlay & Promo Pop-up auto-dismissal (T7 Screen Change)
+ * 3. Dynamic On-Screen Credential & Payment Detection (T11 Credential Boundary)
+ * 4. Safe halt and prompt when genuinely stuck (T10 Genuinely Stuck)
+ * 5. Gesture dispatch fallback for modern Compose/Custom views
+ * 6. Dynamic quantity parameter incrementing (T5 Quantity Slot)
+ * 7. Execution tracking and reporting (T14 Status Reporting)
  */
 class FlowReplayService : AccessibilityService() {
 
@@ -35,6 +41,7 @@ class FlowReplayService : AccessibilityService() {
         const val ACTION_CANCEL = "com.flowpilot.CANCEL_REPLAY"
         const val ACTION_REPLAY_STEP = "com.flowpilot.REPLAY_STEP"
         const val ACTION_REPLAY_DONE = "com.flowpilot.REPLAY_DONE"
+        const val ACTION_REPLAY_STUCK = "com.flowpilot.REPLAY_STUCK"
         const val ACTION_AUTH_PAUSE = "com.flowpilot.AUTH_PAUSE"
         const val ACTION_AUTH_RESUME = "com.flowpilot.AUTH_RESUME"
         const val ACTION_AUTH_CANCEL = "com.flowpilot.AUTH_CANCEL"
@@ -46,11 +53,18 @@ class FlowReplayService : AccessibilityService() {
         const val EXTRA_TOTAL_STEPS = "total_steps"
         const val EXTRA_STEP_DESC = "step_desc"
         const val EXTRA_FLOW_NAME = "flow_name"
+        const val EXTRA_STUCK_REASON = "stuck_reason"
 
         private const val NOTIFICATION_ID = 2001
 
         var isReplaying = false
             private set
+
+        // T14 Reporting Status Trackers
+        var lastRunSuccess: Boolean? = null
+        var lastRunFlowName: String = ""
+        var lastRunHaltedStep: Int = 0
+        var lastRunReason: String = ""
 
         private var authDeferred: CompletableDeferred<Boolean>? = null
 
@@ -67,7 +81,7 @@ class FlowReplayService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Not used during replay — we drive actions proactively
+        // Driven proactively during replay
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -99,6 +113,11 @@ class FlowReplayService : AccessibilityService() {
         }
 
         isReplaying = true
+        lastRunFlowName = flow.flowName
+        lastRunSuccess = null
+        lastRunHaltedStep = 0
+        lastRunReason = "Replay in progress"
+
         Log.i(TAG, "▶️ Replaying '${flow.flowName}' with params: $params")
 
         replayJob = scope.launch {
@@ -110,6 +129,8 @@ class FlowReplayService : AccessibilityService() {
         replayJob?.cancel()
         authDeferred?.complete(false)
         isReplaying = false
+        lastRunSuccess = false
+        lastRunReason = "Replay cancelled by user"
         stopForeground(STOP_FOREGROUND_REMOVE)
         Log.i(TAG, "❌ Replay cancelled")
     }
@@ -147,21 +168,52 @@ class FlowReplayService : AccessibilityService() {
             delay(step.waitAfterMs.toLong())
 
             val success = executeStep(step, flow, params)
-            if (success) successCount++ else failCount++
+            if (success) {
+                successCount++
+            } else {
+                failCount++
+                // T10: Genuinely Stuck — detect failure immediately, halt to prevent destructive wrong taps!
+                Log.w(TAG, "❌ [T10 Genuinely Stuck] Step ${step.stepIndex + 1} (${step.description}) failed. Halting replay.")
+
+                lastRunSuccess = false
+                lastRunHaltedStep = step.stepIndex + 1
+                lastRunReason = "Could not find or interact with element for: ${step.description}"
+
+                showStuckNotification(step.description, step.stepIndex + 1, flow.steps.size)
+
+                val stuckIntent = Intent(ACTION_REPLAY_STUCK).apply {
+                    putExtra(EXTRA_STEP_INDEX, step.stepIndex)
+                    putExtra(EXTRA_TOTAL_STEPS, flow.steps.size)
+                    putExtra(EXTRA_STEP_DESC, step.description)
+                    putExtra(EXTRA_FLOW_NAME, flow.flowName)
+                    putExtra(EXTRA_STUCK_REASON, lastRunReason)
+                    setPackage(packageName)
+                }
+                sendBroadcast(stuckIntent)
+                break
+            }
         }
 
         isReplaying = false
         stopForeground(STOP_FOREGROUND_REMOVE)
 
-        // Broadcast completion result
+        if (failCount == 0 && successCount > 0) {
+            lastRunSuccess = true
+            lastRunHaltedStep = flow.steps.size
+            lastRunReason = "All ${flow.steps.size} steps completed successfully."
+        }
+
+        // Broadcast completion result (T14 Reporting)
         val doneIntent = Intent(ACTION_REPLAY_DONE).apply {
             putExtra(EXTRA_SUCCESS, failCount == 0 && successCount > 0)
             putExtra(EXTRA_FLOW_NAME, flow.flowName)
+            putExtra(EXTRA_STEP_INDEX, lastRunHaltedStep)
+            putExtra(EXTRA_STUCK_REASON, lastRunReason)
             setPackage(packageName)
         }
         sendBroadcast(doneIntent)
 
-        Log.i(TAG, "✅ Replay done: $successCount succeeded, $failCount failed")
+        Log.i(TAG, "🏁 Replay finished: $successCount succeeded, $failCount failed (Status: $lastRunReason)")
     }
 
     private suspend fun executeStep(
@@ -169,13 +221,16 @@ class FlowReplayService : AccessibilityService() {
         flow: FlowGraph,
         params: Map<String, String>
     ): Boolean {
-        // Handle Security / Auth Pause (PPT Slide 6 & 10)
-        if (step.isAuthPause) {
-            Log.i(TAG, "🔒 AUTH PAUSE triggered on step ${step.stepIndex}: ${step.description}")
-            showAuthPauseNotification(step.description)
+        // T11: Credential & Security Boundary Gate
+        // Triggered by either compile-time flag OR dynamic on-screen keyword inspection
+        val isSensitiveScreen = step.isAuthPause || checkDynamicSecurityBoundary()
+        if (isSensitiveScreen) {
+            val desc = if (step.isAuthPause) step.description else "Sensitive payment or authentication screen detected"
+            Log.i(TAG, "🔒 [T11 Credential Boundary] AUTH PAUSE triggered on step ${step.stepIndex}: $desc")
+            showAuthPauseNotification(desc)
 
             val authIntent = Intent(ACTION_AUTH_PAUSE).apply {
-                putExtra(EXTRA_STEP_DESC, step.description)
+                putExtra(EXTRA_STEP_DESC, desc)
                 putExtra(EXTRA_FLOW_NAME, flow.flowName)
                 putExtra(EXTRA_STEP_INDEX, step.stepIndex)
                 setPackage(packageName)
@@ -214,7 +269,7 @@ class FlowReplayService : AccessibilityService() {
                     delay(3000) // Wait for app to load
                     true
                 } else {
-                    Log.e(TAG, "  ❌ Cannot launch ${flow.targetAppPackage}")
+                    Log.e(TAG, "  ❌ Cannot launch package ${flow.targetAppPackage}")
                     false
                 }
             }
@@ -231,6 +286,24 @@ class FlowReplayService : AccessibilityService() {
                 false
             }
         }
+    }
+
+    // ─────────────────────────────────────────────
+    // Dynamic Security Inspection (T11 Credential Boundary)
+    // ─────────────────────────────────────────────
+
+    private fun checkDynamicSecurityBoundary(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val sensitivePatterns = listOf(
+            "password", "enter pin", "upi pin", "cvv", "otp", "card number",
+            "debit card", "credit card", "payment method", "pay now", "proceed to pay",
+            "verify with otp", "one time password"
+        )
+        return findNodeRecursive(root) { node ->
+            val text = (node.text?.toString() ?: "").lowercase()
+            val desc = (node.contentDescription?.toString() ?: "").lowercase()
+            sensitivePatterns.any { pattern -> text.contains(pattern) || desc.contains(pattern) }
+        } != null
     }
 
     // ─────────────────────────────────────────────
@@ -263,27 +336,55 @@ class FlowReplayService : AccessibilityService() {
     private suspend fun performClick(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
         val node = findElementWithRetry(resolvedSelector) ?: return false
-        val result = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        if (!result) {
-            // Try clicking parent
-            node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        var clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        if (!clicked) {
+            // Fallback 1: Try clicking parent
+            clicked = node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        }
+        if (!clicked) {
+            // Fallback 2: Direct gesture dispatch (for Compose / custom views)
+            clicked = dispatchTapGesture(node)
         }
         node.recycle()
-        return true
+
+        // T5: Dynamic Quantity Slot handling
+        val qty = params["quantity"]?.toIntOrNull() ?: 1
+        val isAddAction = step.description.contains("add", ignoreCase = true) ||
+                          step.selector["text_contains"]?.contains("add", ignoreCase = true) == true
+
+        if (clicked && qty > 1 && isAddAction) {
+            for (q in 2..qty) {
+                delay(800)
+                rootInActiveWindow?.let { root ->
+                    val plusNode = findNodeRecursive(root) { n ->
+                        val t = n.text?.toString() ?: ""
+                        val d = n.contentDescription?.toString() ?: ""
+                        (t == "+" || d.contains("increase", ignoreCase = true) || d.contains("add", ignoreCase = true))
+                    }
+                    if (plusNode != null) {
+                        plusNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) || dispatchTapGesture(plusNode)
+                        plusNode.recycle()
+                        Log.i(TAG, "  ➕ [T5 Quantity] Incremented quantity ($q/$qty)")
+                    }
+                }
+            }
+        }
+
+        return clicked
     }
 
     private suspend fun performType(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
         val node = findElementWithRetry(resolvedSelector) ?: return false
 
-        // Determine text to type
+        // Determine text to type (injected param or default)
         val text = if (step.parameterSlot != null) {
             params[step.parameterSlot] ?: step.defaultValue ?: ""
         } else {
             step.defaultValue ?: ""
         }
 
-        // Focus and set text
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
@@ -306,8 +407,25 @@ class FlowReplayService : AccessibilityService() {
         return false
     }
 
+    private fun dispatchTapGesture(node: AccessibilityNodeInfo): Boolean {
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        val x = rect.centerX().toFloat()
+        val y = rect.centerY().toFloat()
+        if (x <= 0 || y <= 0) return false
+
+        val path = Path().apply {
+            moveTo(x, y)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 100)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val dispatched = dispatchGesture(gesture, null, null)
+        Log.d(TAG, "  👆 Gesture tap dispatched at ($x, $y) -> $dispatched")
+        return dispatched
+    }
+
     // ─────────────────────────────────────────────
-    // Semantic Element Finder (Cascading Fallback)
+    // Semantic Element Finder (Cascading Fallback + Pop-up Dismissal)
     // ─────────────────────────────────────────────
 
     private suspend fun findElementWithRetry(selector: Map<String, String>, maxRetries: Int = 3): AccessibilityNodeInfo? {
@@ -321,6 +439,20 @@ class FlowReplayService : AccessibilityService() {
             if (node != null) return node
 
             Log.d(TAG, "  🔍 Element not found (attempt $attempt/$maxRetries)")
+
+            // T7: Check for unexpected promo pop-ups / overlays obstructing the view
+            if (attempt <= 2) {
+                val dismissed = dismissUnexpectedOverlay(root)
+                if (dismissed) {
+                    Log.i(TAG, "  🎉 [T7 Screen Change] Unexpected overlay/pop-up dismissed! Retrying element search...")
+                    delay(1200)
+                    rootInActiveWindow?.let { newRoot ->
+                        val retryNode = findElement(newRoot, selector)
+                        if (retryNode != null) return retryNode
+                    }
+                }
+            }
+
             delay(1000)
 
             // On last retry, try scrolling to bring element into view
@@ -332,6 +464,37 @@ class FlowReplayService : AccessibilityService() {
             }
         }
         return null
+    }
+
+    private fun dismissUnexpectedOverlay(root: AccessibilityNodeInfo): Boolean {
+        val dismissPatterns = listOf(
+            "close", "dismiss", "cancel", "not now", "later", "skip", "no thanks", "✕", "x"
+        )
+
+        val dismissNode = findNodeRecursive(root) { node ->
+            val text = (node.text?.toString() ?: "").trim().lowercase()
+            val desc = (node.contentDescription?.toString() ?: "").trim().lowercase()
+            val viewId = (node.viewIdResourceName ?: "").lowercase()
+
+            val isClickableOrButton = node.isClickable || (node.className?.toString()?.lowercase()?.let {
+                it.contains("button") || it.contains("imageview") || it.contains("view")
+            } ?: false)
+
+            isClickableOrButton && (
+                dismissPatterns.any { p -> text == p || desc == p || (text.length <= 4 && text.contains(p)) } ||
+                viewId.contains("close") || viewId.contains("dismiss") || viewId.contains("btn_close")
+            )
+        }
+
+        if (dismissNode != null) {
+            Log.d(TAG, "  Found overlay dismiss candidate: text='${dismissNode.text}', desc='${dismissNode.contentDescription}', id='${dismissNode.viewIdResourceName}'")
+            val clicked = dismissNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+                          (dismissNode.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
+                          dispatchTapGesture(dismissNode)
+            dismissNode.recycle()
+            return clicked
+        }
+        return false
     }
 
     private fun findElement(root: AccessibilityNodeInfo, selector: Map<String, String>): AccessibilityNodeInfo? {
@@ -486,6 +649,27 @@ class FlowReplayService : AccessibilityService() {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .addAction(android.R.drawable.ic_media_play, "I've Done It (Continue)", resumePending)
             .addAction(android.R.drawable.ic_delete, "Cancel Flow", cancelPending)
+            .build()
+
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
+    private fun showStuckNotification(stepDesc: String, currentStep: Int, totalSteps: Int) {
+        val cancelIntent = Intent(this, FlowReplayService::class.java).apply {
+            action = ACTION_CANCEL
+        }
+        val cancelPending = PendingIntent.getService(
+            this, 3, cancelIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, FlowPilotApp.CHANNEL_REPLAY)
+            .setContentTitle("FlowPilot Stuck ⚠️")
+            .setContentText("Stuck at step $currentStep/$totalSteps: $stepDesc")
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setOngoing(false)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addAction(android.R.drawable.ic_delete, "Dismiss", cancelPending)
             .build()
 
         startForeground(NOTIFICATION_ID, notification)

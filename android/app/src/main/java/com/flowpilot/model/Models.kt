@@ -172,5 +172,14 @@ data class MatchResult(
     val transcribedText: String? = null,
 
     @SerializedName("suggestion") @SerialName("suggestion")
-    val suggestion: String? = null
+    val suggestion: String? = null,
+
+    @SerializedName("is_ambiguous") @SerialName("is_ambiguous")
+    val isAmbiguous: Boolean = false,
+
+    @SerializedName("clarification_prompt") @SerialName("clarification_prompt")
+    val clarificationPrompt: String? = null,
+
+    @SerializedName("ambiguity_options") @SerialName("ambiguity_options")
+    val ambiguityOptions: List<String>? = null
 )

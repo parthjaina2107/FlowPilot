@@ -153,10 +153,22 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var replayTotalSteps by remember { mutableIntStateOf(0) }
     var replayStepDesc by remember { mutableStateOf("") }
 
-    // Auth Pause State
+    // Auth Pause State (T11)
     var showAuthPauseDialog by remember { mutableStateOf(false) }
     var authPauseStepDesc by remember { mutableStateOf("") }
     var authPauseFlowName by remember { mutableStateOf("") }
+
+    // Genuinely Stuck Dialog State (T10)
+    var showStuckDialog by remember { mutableStateOf(false) }
+    var stuckStepDesc by remember { mutableStateOf("") }
+    var stuckFlowName by remember { mutableStateOf("") }
+    var stuckReason by remember { mutableStateOf("") }
+
+    // Ambiguity Clarification Dialog State (T13)
+    var showAmbiguityDialog by remember { mutableStateOf(false) }
+    var ambiguityPrompt by remember { mutableStateOf("") }
+    var ambiguityOptions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingAmbiguousMatch by remember { mutableStateOf<MatchResult?>(null) }
 
     // Speech Recognizer instance
     var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
@@ -231,6 +243,24 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                 if (!matches.isNullOrEmpty()) {
                     val text = matches[0]
                     recognizedText = text
+
+                    // T14 Reporting: Check if user asks about status of previous run
+                    val lower = text.lowercase().trim()
+                    if (lower.contains("did the last run succeed") || lower.contains("last run status") || lower.contains("did it succeed") || lower.contains("status of last run")) {
+                        val lastSuccess = FlowReplayService.lastRunSuccess
+                        val lastFlow = FlowReplayService.lastRunFlowName
+                        val lastStep = FlowReplayService.lastRunHaltedStep
+                        val lastReason = FlowReplayService.lastRunReason
+
+                        voiceState = if (lastSuccess == true) VoiceState.DONE else VoiceState.ERROR
+                        statusMessage = when (lastSuccess) {
+                            true -> "Last run '$lastFlow' SUCCEEDED! All $lastStep steps finished successfully 🎉"
+                            false -> "Last run '$lastFlow' STOPPED at step $lastStep: $lastReason"
+                            else -> "No flow has been executed yet in this session."
+                        }
+                        return
+                    }
+
                     voiceState = VoiceState.PROCESSING
                     statusMessage = "Matching '$text' against FlowPilot flows..."
 
@@ -241,6 +271,17 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             matchResult = res
 
                             if (res.matched && res.flowGraph != null) {
+                                // T13: Ambiguity Resolution — ask or confirm before executing
+                                if (res.isAmbiguous) {
+                                    voiceState = VoiceState.MATCHED
+                                    statusMessage = res.clarificationPrompt ?: "Clarification needed"
+                                    ambiguityPrompt = res.clarificationPrompt ?: "Did you mean to execute this flow?"
+                                    ambiguityOptions = res.ambiguityOptions ?: listOf(res.flowName ?: "Confirm")
+                                    pendingAmbiguousMatch = res
+                                    showAmbiguityDialog = true
+                                    return@launch
+                                }
+
                                 voiceState = VoiceState.MATCHED
                                 statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
 
@@ -310,6 +351,14 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         voiceState = if (success) VoiceState.DONE else VoiceState.ERROR
                         statusMessage = if (success) "Flow automation completed successfully! 🎉" else "Replay encountered an issue."
                     }
+                    FlowReplayService.ACTION_REPLAY_STUCK -> {
+                        stuckStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: "Unknown step"
+                        stuckFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
+                        stuckReason = intent.getStringExtra(FlowReplayService.EXTRA_STUCK_REASON) ?: "Target UI element not found"
+                        voiceState = VoiceState.ERROR
+                        statusMessage = "FlowPilot got stuck at step $replayCurrentStep: $stuckStepDesc"
+                        showStuckDialog = true
+                    }
                 }
             }
         }
@@ -318,6 +367,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             addAction(FlowReplayService.ACTION_REPLAY_STEP)
             addAction(FlowReplayService.ACTION_AUTH_PAUSE)
             addAction(FlowReplayService.ACTION_REPLAY_DONE)
+            addAction(FlowReplayService.ACTION_REPLAY_STUCK)
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -603,6 +653,147 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     }
                 ) {
                     Text("Cancel Flow")
+                }
+            },
+            containerColor = CardBg,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // T10: Genuinely Stuck Dialog — asks the user what to do when an unexpected screen or failure occurs
+    if (showStuckDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showStuckDialog = false
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Warning, contentDescription = null, tint = AccentOrange)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("FlowPilot is Stuck", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "Automation '$stuckFlowName' stopped safely to prevent wrong taps:",
+                        color = TextPrimary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceBg),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            "$stuckStepDesc\nReason: $stuckReason",
+                            color = AccentOrange,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        "App language change, account logout, or UI obstruction detected. How would you like to proceed?",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showStuckDialog = false
+                        statusMessage = "Manual takeover active. You can now complete the task."
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen)
+                ) {
+                    Text("I'll Take Over (Manual)")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        showStuckDialog = false
+                        val cancelIntent = Intent(context, FlowReplayService::class.java).apply {
+                            action = FlowReplayService.ACTION_CANCEL
+                        }
+                        context.startService(cancelIntent)
+                        statusMessage = "Flow cancelled after being stuck."
+                    }
+                ) {
+                    Text("Cancel Flow")
+                }
+            },
+            containerColor = CardBg,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // T13: Ambiguity Resolution Dialog — confirms or clarifies when intent/slots are broad or multiple flows match
+    if (showAmbiguityDialog && pendingAmbiguousMatch != null) {
+        val currentMatch = pendingAmbiguousMatch!!
+        AlertDialog(
+            onDismissRequest = {
+                showAmbiguityDialog = false
+                pendingAmbiguousMatch = null
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.HelpOutline, contentDescription = null, tint = SamsungLightBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Clarification Needed", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        ambiguityPrompt,
+                        color = TextPrimary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    ambiguityOptions.forEach { opt ->
+                        Button(
+                            onClick = {
+                                showAmbiguityDialog = false
+                                pendingAmbiguousMatch = null
+                                if (currentMatch.flowGraph != null) {
+                                    voiceState = VoiceState.REPLAYING
+                                    replayFlowName = currentMatch.flowName ?: ""
+                                    replayTotalSteps = currentMatch.flowGraph.steps.size
+                                    replayCurrentStep = 0
+
+                                    val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                                        action = FlowReplayService.ACTION_REPLAY
+                                        putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(currentMatch.flowGraph))
+                                        putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(currentMatch.parameters ?: emptyMap<String, String>()))
+                                    }
+                                    context.startService(replayIntent)
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(opt, fontSize = 13.sp)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        showAmbiguityDialog = false
+                        pendingAmbiguousMatch = null
+                        statusMessage = "Clarification cancelled."
+                    }
+                ) {
+                    Text("Cancel")
                 }
             },
             containerColor = CardBg,

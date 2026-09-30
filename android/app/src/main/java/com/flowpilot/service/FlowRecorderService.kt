@@ -45,12 +45,19 @@ class FlowRecorderService : AccessibilityService() {
         const val EXTRA_TARGET_PACKAGE = "target_package"
         const val EXTRA_TRACE_PATH = "trace_path"
 
-        // Packages to ignore
+        // Packages to ignore (system UI, launchers, phone dialers, incoming call screens)
         private val IGNORED_PACKAGES = setOf(
             "com.flowpilot",
             "com.android.systemui",
             "com.android.launcher",
             "com.android.launcher3",
+            "com.google.android.apps.nexuslauncher",
+            "com.sec.android.app.launcher",
+            "com.google.android.dialer",
+            "com.android.phone",
+            "com.samsung.android.incallui",
+            "com.samsung.android.dialer",
+            "com.android.server.telecom"
         )
 
         // Notification
@@ -163,8 +170,20 @@ class FlowRecorderService : AccessibilityService() {
         if (!isRecording || event == null) return
 
         val pkg = event.packageName?.toString() ?: return
-        // Ignore our own app and system UI
-        if (pkg in IGNORED_PACKAGES) return
+        // Ignore our own app, system UI, and phone call/dialer screens (Bonus 1: Prune non-required touches)
+        if (pkg in IGNORED_PACKAGES) {
+            Log.d(TAG, "  🚫 [Bonus 1 Pruning] Ignored event in system/call package: $pkg")
+            return
+        }
+
+        // Infer target package on first app interaction if not pre-specified
+        if (targetPackage.isBlank()) {
+            targetPackage = pkg
+            Log.i(TAG, "  🎯 Inferred target package: $targetPackage")
+        } else if (pkg != targetPackage) {
+            Log.d(TAG, "  🚫 [Bonus 1 Pruning] Dropped out-of-target action in $pkg (target is $targetPackage)")
+            return
+        }
 
         val source = event.source ?: return
 

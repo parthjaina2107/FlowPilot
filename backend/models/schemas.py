@@ -160,3 +160,6 @@ class MatchResult(BaseModel):
     flow_graph: Optional[FlowGraph] = None
     transcribed_text: Optional[str] = None
     suggestion: Optional[str] = None
+    is_ambiguous: bool = False
+    clarification_prompt: Optional[str] = None
+    ambiguity_options: Optional[list[str]] = None

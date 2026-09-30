@@ -18,44 +18,43 @@
 
 ---
 
-## 2. 3-Minute Live Demonstration Script
+## 2. Official 5-Minute Unedited Demonstration Script
 
-### Step 1: The Problem (0:00 - 0:30)
-- Pick up the phone or emulator.
-- Trigger voice: *"Order butter chicken on Zomato."*
-- Point to the screen: FlowPilot immediately matches the intent with 100% confidence, launches Zomato, searches the restaurant, selects the dish, adds it to the cart, and halts safely before the final payment.
+In strict accordance with the **Samsung PRISM Theme 3 Submission Guidelines**, the evaluation video demonstrates the following 5 parts, unedited and in exact order:
 
-### Step 2: The Magic — Teachable Automation (0:30 - 1:45)
-- Open FlowPilot and tap **Teach / Record New Flow**.
-- Name it: *"Buy Protein Powder on Amazon"*.
-- Voice Trigger: *"Buy protein powder on Amazon"*.
-- Tap **Start Recording**.
-- Switch to Amazon, search for "protein powder", tap the first item, tap "Add to Cart", and tap "Proceed to checkout".
-- Return to FlowPilot and tap **Stop & Compile Flow**.
-- **Show the Gemini FlowCompiler in action**:
-  - Live synthesis of raw gestures into semantic selectors.
-  - Identification of the dynamic slot `[item_name]`.
-  - Automatic detection of the checkout step as a **Security Auth Pause**.
+```
+[Official Sequence]: (a) Teach Flow ➔ (b) Exact Replay ➔ (c) Paraphrase ➔ (d) Changed Slot ➔ (e) Assistant Asking When Stuck
+```
 
-### Step 3: Natural Language Replay & Parameter Variation (1:45 - 2:30)
-- Tap the microphone button in FlowPilot.
-- Speak a brand new query: *"Can you buy protein powder from Amazon?"*
-- Watch the live progress indicator on the phone:
-  - Step 1: Launch Amazon
-  - Step 2: Tap search bar
-  - Step 3: Type item name
-  - Step 4: Add to Cart
-  - Step 5: **Security Auth Pause triggers**:
-    - Dialog pops up: *"Security Auth Pause: Please complete authentication before checkout"*.
-    - Replay is securely suspended until the user authenticates with fingerprint / PIN.
-    - User taps *"I've Authenticated (Continue)"*, and the flow completes safely!
+### Part (a): Teaching one flow by voice + taps (0:00 – 1:30)
+- **Voice trigger**: Speak *"Order a Margherita pizza from Domino's on Zomato"*.
+- **Demonstration**: Open Zomato, search for "Domino's", select "Margherita Pizza", tap "Add to Cart", and stop at the payment checkout screen.
+- **Flow Synthesis**: Return to FlowPilot and tap **Stop & Compile**.
+  - FlowCompiler (Gemini 2.0 Flash) abstracts raw taps into semantic selectors.
+  - Parameter slots (`[dish_name]`, `[quantity]`) are extracted.
+  - Screen confirmation shown: *"Learned: Order Margherita pizza from Domino's"*.
 
-### Step 4: The Evaluation Benchmark (2:30 - 3:00)
-- Show the 5-app benchmark results:
-  - **100% intent match accuracy** across 25 natural language variations.
-  - **1146 ms average match latency**.
-  - **100% negative control rejection** in under 40 ms.
-  - Complete zero-credential safety with explicit Auth Pause gates.
+### Part (b): Replaying it with the exact utterance (1:30 – 2:15)
+- **Voice command**: Repeat verbatim: *"Order a Margherita pizza from Domino's on Zomato"*.
+- **Autonomous Execution**: FlowPilot recognizes the command (100% confidence), launches Zomato, searches the item, adds it to the cart, and halts safely with the Auth Pause gate before payment.
+- **Pass Verification**: Reaches payment unattended with correct item in cart.
+
+### Part (c): Replaying with a paraphrase (2:15 – 3:00)
+- **Paraphrase command 1**: *"Get me a margherita from dominos"*.
+- **Paraphrase command 2**: *"I want to order margherita pizza on zomato"*.
+- **Semantic Matching**: Sentence-BERT embeds the sentence into ChromaDB; cosine similarity exceeds 92%, triggering the identical flow without re-teaching.
+
+### Part (d): Replaying with a changed slot value (3:00 – 3:45)
+- **Slot modification**: *"Order a Farmhouse pizza from Domino's on Zomato"*.
+- **Dynamic Slot Injection**: FlowPilot extracts `dish_name = "Farmhouse pizza"`.
+- **Execution**: The search field receives "Farmhouse pizza", adds Farmhouse to cart, and reaches checkout.
+
+### Part (e): Assistant asking the user a question when stuck (3:45 – 4:45)
+- **Stuck Trigger**: Pre-condition simulated (app language switched to Hindi or logged out).
+- **Graceful Halt**: FlowPilot attempts cascading element recovery (<30s). Detecting that critical nodes are missing, it halts without destructive mis-clicks.
+- **Interactive Question**: A clear stuck dialog appears on screen and TTS prompts the user:
+  > *"FlowPilot is stuck at Step 2: Could not find search bar. Would you like to take over manually or cancel?"*
+- User chooses manual takeover or cancellation safely.
 
 ---
 

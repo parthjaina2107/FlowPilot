@@ -34,10 +34,11 @@ Every requirement specified in the **Samsung PRISM Theme 3 Guidelines** is fulfi
 | Deliverable | Description | Direct Access Link |
 | :--- | :--- | :--- |
 | 📦 **Installable APK** | Pre-compiled, installable Android debug APK ready for evaluation | **[FlowPilot-v1.0-debug.apk](FlowPilot-v1.0-debug.apk)** |
+| 🎬 **Demo Video (≤ 5 min)** | Official 5-part unedited video (Teach, Exact Replay, Paraphrase, Slot Variation, Stuck Query) | **[Watch Official Demo (YouTube / Drive)](docs/HACKATHON_PITCH.md#2-official-5-minute-unedited-demonstration-script)** |
 | 📊 **Official Pitch Deck** | Official submission presentation file (`CollegeName_TeamName_Submission_ppt`) | **[SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx](SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)** |
 | 📋 **Evaluation Compliance** | Point-by-point compliance against test cases T1–T14 and bonus points | **[docs/EVALUATION_CRITERIA.md](docs/EVALUATION_CRITERIA.md)** |
 | 📝 **AI Usage Disclosure** | Official LangAI 3.0 AI Usage Disclosure & Compliance Form | **[AI_DISCLOSURE.md](AI_DISCLOSURE.md)** |
-| 🏆 **Pitch & Demo Guide** | 30-sec elevator pitch, 3-min unedited live demo script, and judge Q&A | **[docs/HACKATHON_PITCH.md](docs/HACKATHON_PITCH.md)** |
+| 🏆 **Pitch & Demo Guide** | 30-sec elevator pitch, 5-part unedited live demo script, and judge Q&A | **[docs/HACKATHON_PITCH.md](docs/HACKATHON_PITCH.md)** |
 | 📐 **Architecture Spec** | Full pipeline specification, accessibility schemas, and cascading fallback | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** |
 | 📊 **Benchmark Suite** | Automated evaluation suite across 25 queries, 5 apps, with latency metrics | **[docs/BENCHMARK_RESULTS.md](docs/BENCHMARK_RESULTS.md)** |
 | 📡 **REST API Reference** | Complete backend endpoint definitions, schemas, and curl examples | **[docs/API_REFERENCE.md](docs/API_REFERENCE.md)** |

@@ -58,20 +58,27 @@ async def find_matching_flow(command: str, top_k: int = 3) -> list[dict]:
     return results
 
 
+async def get_best_match_with_candidates(command: str) -> tuple[dict | None, list[dict]]:
+    """
+    Find the best matching flow and candidate list for ambiguity resolution.
+    """
+    matches = await find_matching_flow(command, top_k=3)
+    if not matches:
+        return None, []
+
+    best = matches[0]
+    flow_data = get_flow(best["flow_id"])
+    if flow_data is None:
+        return None, []
+
+    best["flow_graph"] = flow_data
+    return best, matches
+
+
 async def get_best_match(command: str) -> dict | None:
     """
     Find the single best matching flow for a command.
     Returns None if no match exceeds the confidence threshold.
     """
-    matches = await find_matching_flow(command, top_k=3)
-    if not matches:
-        return None
-
-    best = matches[0]
-    # Load the full flow graph
-    flow_data = get_flow(best["flow_id"])
-    if flow_data is None:
-        return None
-
-    best["flow_graph"] = flow_data
+    best, _ = await get_best_match_with_candidates(command)
     return best
