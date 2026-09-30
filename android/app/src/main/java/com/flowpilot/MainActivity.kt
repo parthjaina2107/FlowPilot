@@ -1,12 +1,27 @@
 package com.flowpilot
 
+import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,21 +35,32 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.flowpilot.model.FlowGraph
+import com.flowpilot.model.MatchResult
+import com.flowpilot.model.RecordingTrace
+import com.flowpilot.network.ApiClient
 import com.flowpilot.service.FlowRecorderService
+import com.flowpilot.service.FlowReplayService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
+import java.util.Locale
 
 // ─────────────────────────────────────────────
-// Theme colors (Samsung-inspired dark theme)
+// Theme Colors (Samsung-inspired dark aesthetic)
 // ─────────────────────────────────────────────
 val SamsungBlue = Color(0xFF1428A0)
 val SamsungLightBlue = Color(0xFF4285F4)
@@ -43,8 +69,20 @@ val CardBg = Color(0xFF161B22)
 val SurfaceBg = Color(0xFF21262D)
 val AccentGreen = Color(0xFF3FB950)
 val AccentOrange = Color(0xFFF0883E)
+val AccentPurple = Color(0xFF8957E5)
 val TextPrimary = Color(0xFFE6EDF3)
 val TextSecondary = Color(0xFF8B949E)
+
+enum class VoiceState {
+    IDLE,
+    LISTENING,
+    PROCESSING,
+    MATCHED,
+    REPLAYING,
+    DONE,
+    NO_MATCH,
+    ERROR
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -83,7 +121,10 @@ fun FlowPilotNavigation() {
             )
         }
         composable("record") {
-            RecordScreen(onBack = { navController.popBackStack() })
+            RecordScreen(
+                onBack = { navController.popBackStack() },
+                onFlowCompiled = { navController.navigate("flows") }
+            )
         }
         composable("flows") {
             FlowListScreen(onBack = { navController.popBackStack() })
@@ -92,20 +133,241 @@ fun FlowPilotNavigation() {
 }
 
 // ─────────────────────────────────────────────
-// HOME SCREEN
+// HOME SCREEN (Voice Command & Automation Hub)
 // ─────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var voiceState by remember { mutableStateOf(VoiceState.IDLE) }
+    var recognizedText by remember { mutableStateOf("") }
+    var matchResult by remember { mutableStateOf<MatchResult?>(null) }
+    var statusMessage by remember { mutableStateOf("Tap mic to speak a command") }
+
+    // Live Replay Progress State
+    var replayFlowName by remember { mutableStateOf("") }
+    var replayCurrentStep by remember { mutableIntStateOf(0) }
+    var replayTotalSteps by remember { mutableIntStateOf(0) }
+    var replayStepDesc by remember { mutableStateOf("") }
+
+    // Auth Pause State
+    var showAuthPauseDialog by remember { mutableStateOf(false) }
+    var authPauseStepDesc by remember { mutableStateOf("") }
+    var authPauseFlowName by remember { mutableStateOf("") }
+
+    // Speech Recognizer instance
+    var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
+    var rmsLevel by remember { mutableFloatStateOf(0f) }
+
+    // Permission launcher for audio recording
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (!isGranted) {
+            Toast.makeText(context, "Microphone permission required for voice commands", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Function to start voice recognition
+    fun startListening() {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            Toast.makeText(context, "Speech recognition not available on this device", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        speechRecognizer?.destroy()
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        speechRecognizer = recognizer
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                voiceState = VoiceState.LISTENING
+                statusMessage = "Listening... Speak now"
+                recognizedText = ""
+            }
+
+            override fun onBeginningOfSpeech() {
+                statusMessage = "Hearing your voice..."
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {
+                rmsLevel = rmsdB
+            }
+
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {
+                voiceState = VoiceState.PROCESSING
+                statusMessage = "Processing voice input..."
+            }
+
+            override fun onError(error: Int) {
+                voiceState = VoiceState.IDLE
+                statusMessage = when (error) {
+                    SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Try again."
+                    SpeechRecognizer.ERROR_NETWORK -> "Network error during speech recognition."
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard. Tap to retry."
+                    else -> "Speech error ($error). Tap to retry."
+                }
+            }
+
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    val text = matches[0]
+                    recognizedText = text
+                    voiceState = VoiceState.PROCESSING
+                    statusMessage = "Matching '$text' against FlowPilot flows..."
+
+                    // Call backend matching endpoint
+                    scope.launch {
+                        try {
+                            val res = ApiClient.api.matchTextCommand(mapOf("command" to text))
+                            matchResult = res
+
+                            if (res.matched && res.flowGraph != null) {
+                                voiceState = VoiceState.MATCHED
+                                statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
+
+                                delay(1200)
+
+                                // Trigger Replay Service
+                                voiceState = VoiceState.REPLAYING
+                                replayFlowName = res.flowName ?: ""
+                                replayTotalSteps = res.flowGraph.steps.size
+                                replayCurrentStep = 0
+
+                                val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                                    action = FlowReplayService.ACTION_REPLAY
+                                    putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(res.flowGraph))
+                                    putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(res.parameters ?: emptyMap<String, String>()))
+                                }
+                                context.startService(replayIntent)
+                            } else {
+                                voiceState = VoiceState.NO_MATCH
+                                statusMessage = res.suggestion ?: "No matching flow found. Record a new flow first!"
+                            }
+                        } catch (e: Exception) {
+                            Log.e("FlowPilot", "Match error", e)
+                            voiceState = VoiceState.ERROR
+                            statusMessage = "Failed to reach backend: ${e.localizedMessage}"
+                        }
+                    }
+                } else {
+                    voiceState = VoiceState.IDLE
+                    statusMessage = "Didn't catch that. Tap to try again."
+                }
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!partial.isNullOrEmpty()) {
+                    recognizedText = partial[0]
+                }
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        recognizer.startListening(intent)
+    }
+
+    // Register BroadcastReceiver for Replay events (Step Progress, Auth Pause, Done)
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    FlowReplayService.ACTION_REPLAY_STEP -> {
+                        replayCurrentStep = intent.getIntExtra(FlowReplayService.EXTRA_STEP_INDEX, 0) + 1
+                        replayTotalSteps = intent.getIntExtra(FlowReplayService.EXTRA_TOTAL_STEPS, 1)
+                        replayStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: ""
+                        replayFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
+                        voiceState = VoiceState.REPLAYING
+                        statusMessage = "Executing step $replayCurrentStep/$replayTotalSteps: $replayStepDesc"
+                    }
+                    FlowReplayService.ACTION_AUTH_PAUSE -> {
+                        authPauseStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: "Security verification"
+                        authPauseFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
+                        showAuthPauseDialog = true
+                    }
+                    FlowReplayService.ACTION_REPLAY_DONE -> {
+                        val success = intent.getBooleanExtra(FlowReplayService.EXTRA_SUCCESS, false)
+                        voiceState = if (success) VoiceState.DONE else VoiceState.ERROR
+                        statusMessage = if (success) "Flow automation completed successfully! 🎉" else "Replay encountered an issue."
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter().apply {
+            addAction(FlowReplayService.ACTION_REPLAY_STEP)
+            addAction(FlowReplayService.ACTION_AUTH_PAUSE)
+            addAction(FlowReplayService.ACTION_REPLAY_DONE)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (ignored: Exception) {}
+            speechRecognizer?.destroy()
+        }
+    }
+
+    // Mic Pulse Animation
+    val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = if (voiceState == VoiceState.LISTENING) 1.25f else 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
 
     Scaffold(
         containerColor = DarkBg,
         topBar = {
             TopAppBar(
                 title = {
-                    Text("FlowPilot", fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("FlowPilot", fontWeight = FontWeight.Bold, fontSize = 24.sp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SamsungBlue.copy(alpha = 0.3f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SamsungLightBlue.copy(alpha = 0.5f))
+                        ) {
+                            Text(
+                                "AI AUTOMATION",
+                                color = SamsungLightBlue,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = DarkBg,
@@ -118,108 +380,322 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(24.dp),
+                .padding(horizontal = 24.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Big mic button
+            // Top: Status Banner
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = CardBg),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBg)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        statusMessage,
+                        color = when (voiceState) {
+                            VoiceState.LISTENING -> SamsungLightBlue
+                            VoiceState.PROCESSING -> AccentOrange
+                            VoiceState.MATCHED, VoiceState.REPLAYING -> AccentGreen
+                            VoiceState.DONE -> AccentGreen
+                            VoiceState.NO_MATCH, VoiceState.ERROR -> AccentOrange
+                            else -> TextSecondary
+                        },
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center
+                    )
+
+                    if (recognizedText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "\"$recognizedText\"",
+                            color = TextPrimary,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    // Progress indicator for REPLAY
+                    if (voiceState == VoiceState.REPLAYING && replayTotalSteps > 0) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        LinearProgressIndicator(
+                            progress = { (replayCurrentStep.toFloat() / replayTotalSteps.toFloat()).coerceIn(0f, 1f) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = AccentGreen,
+                            trackColor = SurfaceBg
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "$replayFlowName — Step $replayCurrentStep of $replayTotalSteps",
+                            color = TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+
+            // Center: Big Interactive Mic Button
             Box(
                 modifier = Modifier
-                    .size(120.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(SamsungLightBlue, SamsungBlue)
-                        )
-                    )
-                    .clickable {
-                        Toast.makeText(context, "Voice command — coming soon!", Toast.LENGTH_SHORT).show()
-                    },
+                    .size(160.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    Icons.Filled.Mic,
-                    contentDescription = "Voice command",
-                    tint = Color.White,
-                    modifier = Modifier.size(48.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                "Tap to give a voice command",
-                color = TextSecondary,
-                fontSize = 14.sp
-            )
-
-            Spacer(modifier = Modifier.height(48.dp))
-
-            // Record button
-            Button(
-                onClick = onRecordClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color.Red)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Record New Flow", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // My Flows button
-            OutlinedButton(
-                onClick = onFlowsClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary)
-            ) {
-                Icon(Icons.Filled.List, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("My Flows", fontSize = 16.sp)
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Accessibility settings button
-            TextButton(
-                onClick = {
-                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                // Outer pulsing glow
+                if (voiceState == VoiceState.LISTENING) {
+                    Box(
+                        modifier = Modifier
+                            .size(160.dp)
+                            .scale(pulseScale)
+                            .clip(CircleShape)
+                            .background(SamsungLightBlue.copy(alpha = 0.25f))
+                    )
                 }
+
+                // Inner Main Button
+                Box(
+                    modifier = Modifier
+                        .size(120.dp)
+                        .clip(CircleShape)
+                        .background(
+                            Brush.radialGradient(
+                                colors = when (voiceState) {
+                                    VoiceState.LISTENING -> listOf(Color(0xFFEA4335), Color(0xFFB31412))
+                                    VoiceState.PROCESSING -> listOf(AccentOrange, Color(0xFFC05621))
+                                    VoiceState.REPLAYING -> listOf(AccentGreen, Color(0xFF238636))
+                                    else -> listOf(SamsungLightBlue, SamsungBlue)
+                                }
+                            )
+                        )
+                        .clickable {
+                            if (voiceState == VoiceState.LISTENING) {
+                                speechRecognizer?.stopListening()
+                            } else {
+                                startListening()
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = when (voiceState) {
+                            VoiceState.LISTENING -> Icons.Filled.Mic
+                            VoiceState.PROCESSING -> Icons.Filled.HourglassTop
+                            VoiceState.REPLAYING -> Icons.Filled.PlayArrow
+                            VoiceState.DONE -> Icons.Filled.Check
+                            else -> Icons.Filled.Mic
+                        },
+                        contentDescription = "Voice command",
+                        tint = Color.White,
+                        modifier = Modifier.size(54.dp)
+                    )
+                }
+            }
+
+            // Bottom Actions: Record New Flow & My Flows
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Icon(Icons.Filled.Settings, contentDescription = null, tint = TextSecondary)
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Enable Accessibility Service", color = TextSecondary, fontSize = 12.sp)
+                Button(
+                    onClick = onRecordClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Filled.FiberManualRecord, contentDescription = null, tint = Color.Red)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Teach / Record New Flow", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+
+                OutlinedButton(
+                    onClick = onFlowsClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextPrimary),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBg)
+                ) {
+                    Icon(Icons.Filled.List, contentDescription = null, tint = SamsungLightBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("My Flows (Saved Routines)", fontSize = 16.sp)
+                }
+
+                TextButton(
+                    onClick = {
+                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Settings, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Accessibility Settings", color = TextSecondary, fontSize = 12.sp)
+                }
             }
         }
+    }
+
+    // Security Auth Pause Dialog (PPT Slide 6 & 10)
+    if (showAuthPauseDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                showAuthPauseDialog = false
+                FlowReplayService.resumeAuth(false)
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Lock, contentDescription = null, tint = AccentOrange)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Security Auth Pause", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "The automation '$authPauseFlowName' has reached a protected step requiring your verification:",
+                        color = TextPrimary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceBg),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            authPauseStepDesc,
+                            color = AccentOrange,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        "Please authenticate with Fingerprint / PIN on your device, then tap Continue.",
+                        color = TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAuthPauseDialog = false
+                        FlowReplayService.resumeAuth(true)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen)
+                ) {
+                    Text("I've Authenticated (Continue)")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = {
+                        showAuthPauseDialog = false
+                        FlowReplayService.resumeAuth(false)
+                    }
+                ) {
+                    Text("Cancel Flow")
+                }
+            },
+            containerColor = CardBg,
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 }
 
 // ─────────────────────────────────────────────
-// RECORD SCREEN
+// RECORD SCREEN (LEARN → GENERALISE Pipeline)
 // ─────────────────────────────────────────────
+
+enum class RecordState {
+    IDLE,
+    RECORDING,
+    COMPILING,
+    COMPILED,
+    ERROR
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecordScreen(onBack: () -> Unit) {
+fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var flowName by remember { mutableStateOf("") }
     var triggerPhrase by remember { mutableStateOf("") }
     var targetPackage by remember { mutableStateOf("") }
-    var isRecording by remember { mutableStateOf(false) }
+    var recordState by remember { mutableStateOf(RecordState.IDLE) }
     var actionCount by remember { mutableIntStateOf(0) }
+    var compilationStatus by remember { mutableStateOf("") }
+    var compiledFlow by remember { mutableStateOf<FlowGraph?>(null) }
+    var errorMessage by remember { mutableStateOf("") }
 
     // Poll action count while recording
-    LaunchedEffect(isRecording) {
-        while (isRecording) {
+    LaunchedEffect(recordState) {
+        while (recordState == RecordState.RECORDING) {
             actionCount = FlowRecorderService.actionCount
-            kotlinx.coroutines.delay(500)
+            delay(400)
+        }
+    }
+
+    // BroadcastReceiver for RECORDING_COMPLETE -> triggers GEMINI FlowCompiler
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action == FlowRecorderService.ACTION_COMPLETE) {
+                    val tracePath = intent.getStringExtra(FlowRecorderService.EXTRA_TRACE_PATH) ?: return
+                    Log.i("FlowPilot", "Trace captured at $tracePath. Starting compilation...")
+
+                    recordState = RecordState.COMPILING
+                    compilationStatus = "Reading captured demonstration..."
+
+                    scope.launch {
+                        try {
+                            delay(500)
+                            val traceFile = File(tracePath)
+                            if (!traceFile.exists()) {
+                                recordState = RecordState.ERROR
+                                errorMessage = "Trace file not found at $tracePath"
+                                return@launch
+                            }
+
+                            compilationStatus = "Abstracting UI selectors & parameterising slots via Gemini AI..."
+                            val jsonText = traceFile.readText()
+                            val trace = ApiClient.gson.fromJson(jsonText, RecordingTrace::class.java)
+
+                            val resultFlow = ApiClient.api.compileTrace(trace)
+                            compiledFlow = resultFlow
+                            recordState = RecordState.COMPILED
+                            compilationStatus = "Compiled '${resultFlow.flowName}' into ${resultFlow.steps.size} generalised steps!"
+                        } catch (e: Exception) {
+                            Log.e("FlowPilot", "Compilation error", e)
+                            recordState = RecordState.ERROR
+                            errorMessage = "Compilation failed: ${e.localizedMessage}"
+                        }
+                    }
+                }
+            }
+        }
+
+        val filter = IntentFilter(FlowRecorderService.ACTION_COMPLETE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(receiver, filter)
+        }
+
+        onDispose {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (ignored: Exception) {}
         }
     }
 
@@ -227,7 +703,7 @@ fun RecordScreen(onBack: () -> Unit) {
         containerColor = DarkBg,
         topBar = {
             TopAppBar(
-                title = { Text("Record Flow") },
+                title = { Text("Teach FlowPilot (Record)") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
@@ -247,135 +723,194 @@ fun RecordScreen(onBack: () -> Unit) {
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Step 1: Flow name
-            OutlinedTextField(
-                value = flowName,
-                onValueChange = { flowName = it },
-                label = { Text("Flow Name") },
-                placeholder = { Text("e.g., Order food from Zomato") },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = SamsungBlue,
-                    unfocusedBorderColor = SurfaceBg,
-                    focusedLabelColor = SamsungLightBlue,
-                    cursorColor = SamsungLightBlue,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
-                ),
-                singleLine = true
-            )
-
-            // Step 2: Trigger phrase
-            OutlinedTextField(
-                value = triggerPhrase,
-                onValueChange = { triggerPhrase = it },
-                label = { Text("Voice Trigger Phrase") },
-                placeholder = { Text("e.g., Order paneer from Zomato") },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = SamsungBlue,
-                    unfocusedBorderColor = SurfaceBg,
-                    focusedLabelColor = SamsungLightBlue,
-                    cursorColor = SamsungLightBlue,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
-                ),
-                singleLine = true
-            )
-
-            // Step 3: Target package
-            OutlinedTextField(
-                value = targetPackage,
-                onValueChange = { targetPackage = it },
-                label = { Text("Target App Package") },
-                placeholder = { Text("e.g., com.application.zomato") },
-                modifier = Modifier.fillMaxWidth(),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = SamsungBlue,
-                    unfocusedBorderColor = SurfaceBg,
-                    focusedLabelColor = SamsungLightBlue,
-                    cursorColor = SamsungLightBlue,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary
-                ),
-                singleLine = true
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            if (isRecording) {
-                // Recording status
+            if (recordState == RecordState.COMPILING) {
+                // Compiling with Gemini AI view
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = CardBg),
-                    shape = RoundedCornerShape(16.dp)
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SamsungLightBlue.copy(alpha = 0.5f))
                 ) {
                     Column(
                         modifier = Modifier.padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text("🔴 Recording...", fontSize = 20.sp, color = Color.Red, fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("$actionCount actions captured", color = TextSecondary, fontSize = 16.sp)
+                        CircularProgressIndicator(color = SamsungLightBlue, modifier = Modifier.size(48.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("Gemini FlowCompiler Active", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "Switch to the target app and perform your task.\nReturn here when done.",
+                            compilationStatus,
                             color = TextSecondary,
                             fontSize = 13.sp,
                             textAlign = TextAlign.Center
                         )
                     }
                 }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Stop button
-                Button(
-                    onClick = {
-                        val stopIntent = Intent(context, FlowRecorderService::class.java).apply {
-                            action = FlowRecorderService.ACTION_STOP
-                        }
-                        context.startService(stopIntent)
-                        isRecording = false
-                        Toast.makeText(context, "Recording stopped! $actionCount actions captured.", Toast.LENGTH_LONG).show()
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
-                    shape = RoundedCornerShape(16.dp)
+            } else if (recordState == RecordState.COMPILED && compiledFlow != null) {
+                // Compilation Success View
+                val flow = compiledFlow!!
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = CardBg),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AccentGreen.copy(alpha = 0.5f))
                 ) {
-                    Icon(Icons.Filled.Stop, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Stop Recording", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = AccentGreen, modifier = Modifier.size(28.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Flow Generalised!", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = TextPrimary)
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(flow.flowName, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = SamsungLightBlue)
+                        Text(flow.description, fontSize = 13.sp, color = TextSecondary)
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text("⚡ Steps: ${flow.steps.size} generalised steps", fontSize = 13.sp, color = TextPrimary)
+                        Text("🗣️ Triggers: ${flow.triggerPhrases.joinToString(", ")}", fontSize = 12.sp, color = TextSecondary)
+                        if (flow.parameterSchema.isNotEmpty()) {
+                            Text("🧩 Parameters: ${flow.parameterSchema.keys.joinToString(", ")}", fontSize = 12.sp, color = AccentOrange)
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = onFlowCompiled,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("View in My Flows")
+                        }
+                    }
                 }
             } else {
-                // Start button
-                Button(
-                    onClick = {
-                        if (flowName.isBlank()) {
-                            Toast.makeText(context, "Please enter a flow name", Toast.LENGTH_SHORT).show()
-                            return@Button
+                // Input form
+                OutlinedTextField(
+                    value = flowName,
+                    onValueChange = { flowName = it },
+                    label = { Text("Flow Name") },
+                    placeholder = { Text("e.g., Buy Protein Powder on Amazon") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = SamsungBlue,
+                        unfocusedBorderColor = SurfaceBg,
+                        focusedLabelColor = SamsungLightBlue,
+                        cursorColor = SamsungLightBlue,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    singleLine = true,
+                    enabled = recordState != RecordState.RECORDING
+                )
+
+                OutlinedTextField(
+                    value = triggerPhrase,
+                    onValueChange = { triggerPhrase = it },
+                    label = { Text("Natural Voice Trigger") },
+                    placeholder = { Text("e.g., Order protein powder on Amazon") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = SamsungBlue,
+                        unfocusedBorderColor = SurfaceBg,
+                        focusedLabelColor = SamsungLightBlue,
+                        cursorColor = SamsungLightBlue,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    singleLine = true,
+                    enabled = recordState != RecordState.RECORDING
+                )
+
+                OutlinedTextField(
+                    value = targetPackage,
+                    onValueChange = { targetPackage = it },
+                    label = { Text("Target App Package (Optional)") },
+                    placeholder = { Text("e.g., in.amazon.mShop.android.shopping") },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = SamsungBlue,
+                        unfocusedBorderColor = SurfaceBg,
+                        focusedLabelColor = SamsungLightBlue,
+                        cursorColor = SamsungLightBlue,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    singleLine = true,
+                    enabled = recordState != RecordState.RECORDING
+                )
+
+                if (recordState == RecordState.RECORDING) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = CardBg),
+                        shape = RoundedCornerShape(16.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color.Red.copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("🔴 RECORDING IN PROGRESS", fontSize = 16.sp, color = Color.Red, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text("$actionCount interactions captured", color = TextPrimary, fontSize = 15.sp)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                "Switch to the app, perform the actions you want FlowPilot to learn, then come back and tap Stop.",
+                                color = TextSecondary,
+                                fontSize = 12.sp,
+                                textAlign = TextAlign.Center
+                            )
                         }
-                        val startIntent = Intent(context, FlowRecorderService::class.java).apply {
-                            action = FlowRecorderService.ACTION_START
-                            putExtra(FlowRecorderService.EXTRA_FLOW_NAME, flowName)
-                            putExtra(FlowRecorderService.EXTRA_TRIGGER_PHRASE, triggerPhrase)
-                            putExtra(FlowRecorderService.EXTRA_TARGET_PACKAGE, targetPackage)
-                        }
-                        context.startService(startIntent)
-                        isRecording = true
-                        actionCount = 0
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Icon(Icons.Filled.FiberManualRecord, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Start Recording", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    Button(
+                        onClick = {
+                            val stopIntent = Intent(context, FlowRecorderService::class.java).apply {
+                                action = FlowRecorderService.ACTION_STOP
+                            }
+                            context.startService(stopIntent)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(Icons.Filled.Stop, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Stop & Compile Flow", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            if (flowName.isBlank()) {
+                                Toast.makeText(context, "Please enter a flow name", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            val startIntent = Intent(context, FlowRecorderService::class.java).apply {
+                                action = FlowRecorderService.ACTION_START
+                                putExtra(FlowRecorderService.EXTRA_FLOW_NAME, flowName)
+                                putExtra(FlowRecorderService.EXTRA_TRIGGER_PHRASE, triggerPhrase)
+                                putExtra(FlowRecorderService.EXTRA_TARGET_PACKAGE, targetPackage)
+                            }
+                            context.startService(startIntent)
+                            recordState = RecordState.RECORDING
+                            actionCount = 0
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(Icons.Filled.FiberManualRecord, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Start Recording Demonstration", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+
+                if (recordState == RecordState.ERROR) {
+                    Text(errorMessage, color = Color.Red, fontSize = 13.sp)
                 }
             }
         }
@@ -383,39 +918,49 @@ fun RecordScreen(onBack: () -> Unit) {
 }
 
 // ─────────────────────────────────────────────
-// FLOW LIST SCREEN
+// FLOW LIST SCREEN (Browse, Inspect & Test Replay)
 // ─────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FlowListScreen(onBack: () -> Unit) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var flows by remember { mutableStateOf<List<Map<String, String>>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
-    // Load flows from backend
-    LaunchedEffect(Unit) {
+    fun refreshFlows() {
         scope.launch {
+            loading = true
             try {
-                val result = com.flowpilot.network.ApiClient.api.listFlows()
+                val result = ApiClient.api.listFlows()
                 flows = result
                 loading = false
             } catch (e: Exception) {
-                error = e.message
+                error = e.localizedMessage
                 loading = false
             }
         }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshFlows()
     }
 
     Scaffold(
         containerColor = DarkBg,
         topBar = {
             TopAppBar(
-                title = { Text("My Flows") },
+                title = { Text("My Flows (${flows.size})") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { refreshFlows() }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = TextPrimary)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -442,8 +987,12 @@ fun FlowListScreen(onBack: () -> Unit) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Filled.Warning, contentDescription = null, tint = AccentOrange, modifier = Modifier.size(48.dp))
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("Cannot connect to backend", color = TextPrimary, fontSize = 16.sp)
+                        Text("Backend connection failed", color = TextPrimary, fontSize = 16.sp)
                         Text(error ?: "", color = TextSecondary, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(onClick = { refreshFlows() }) {
+                            Text("Retry")
+                        }
                     }
                 }
             }
@@ -455,8 +1004,8 @@ fun FlowListScreen(onBack: () -> Unit) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Filled.Inbox, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(64.dp))
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("No flows yet", color = TextPrimary, fontSize = 18.sp)
-                        Text("Record your first flow to get started!", color = TextSecondary)
+                        Text("No flows recorded yet", color = TextPrimary, fontSize = 18.sp)
+                        Text("Teach FlowPilot a task to see it here!", color = TextSecondary)
                     }
                 }
             }
@@ -470,31 +1019,90 @@ fun FlowListScreen(onBack: () -> Unit) {
                     contentPadding = PaddingValues(vertical = 16.dp)
                 ) {
                     items(flows) { flow ->
+                        val flowId = flow["flow_id"] ?: ""
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             colors = CardDefaults.cardColors(containerColor = CardBg),
-                            shape = RoundedCornerShape(16.dp)
+                            shape = RoundedCornerShape(16.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBg)
                         ) {
                             Column(modifier = Modifier.padding(16.dp)) {
-                                Text(
-                                    flow["flow_name"] ?: "Unnamed",
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = TextPrimary
-                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        flow["flow_name"] ?: "Unnamed Flow",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = TextPrimary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            scope.launch {
+                                                try {
+                                                    ApiClient.api.deleteFlow(flowId)
+                                                    refreshFlows()
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(context, "Delete failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                    ) {
+                                        Icon(Icons.Filled.DeleteOutline, contentDescription = "Delete", tint = TextSecondary)
+                                    }
+                                }
+
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     flow["description"] ?: "",
                                     fontSize = 13.sp,
                                     color = TextSecondary,
-                                    maxLines = 2
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    "📦 ${flow["target_app_package"] ?: ""}",
-                                    fontSize = 11.sp,
-                                    color = TextSecondary
-                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "📦 ${flow["target_app_package"] ?: ""}",
+                                        fontSize = 11.sp,
+                                        color = SamsungLightBlue
+                                    )
+
+                                    // Quick Test Replay Button
+                                    Button(
+                                        onClick = {
+                                            scope.launch {
+                                                try {
+                                                    val fullFlow = ApiClient.api.getFlow(flowId)
+                                                    val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                                                        action = FlowReplayService.ACTION_REPLAY
+                                                        putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(fullFlow))
+                                                        putExtra(FlowReplayService.EXTRA_PARAMS_JSON, "{}")
+                                                    }
+                                                    context.startService(replayIntent)
+                                                    Toast.makeText(context, "Replaying '${fullFlow.flowName}'...", Toast.LENGTH_SHORT).show()
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(context, "Could not replay: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Replay", fontSize = 12.sp)
+                                    }
+                                }
                             }
                         }
                     }
