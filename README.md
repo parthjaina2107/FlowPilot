@@ -4,7 +4,7 @@
 
 [![Samsung PRISM](https://img.shields.io/badge/Samsung_PRISM-GenAI_Hackathon_3.0-0c2340?style=for-the-badge&logo=samsung)](https://github.com/parthjaina2107/FlowPilot)
 [![Theme](https://img.shields.io/badge/Theme_%2303-Teachable_Voice_Automation-1428a0?style=for-the-badge)](docs/EVALUATION_CRITERIA.md)
-[![Team](https://img.shields.io/badge/Team-Cheesecake_·_SRMIST-008080?style=for-the-badge)](SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)
+[![Team](https://img.shields.io/badge/Team-Cheesecake_·_SRMIST-008080?style=for-the-badge)](SRMUniversity_Cheesecake_Submission.pptx)
 [![Release Tag](https://img.shields.io/badge/Release_Tag-PRISM__GENAI__HACKATHON__Y2026-green?style=for-the-badge)](https://github.com/parthjaina2107/FlowPilot/releases/tag/PRISM_GENAI_HACKATHON_Y2026)
 
 > **Event**: Samsung PRISM Generative AI Hackathon — 3rd Edition (2026–27)  
@@ -35,7 +35,7 @@ Every requirement specified in the **Samsung PRISM Theme 3 Guidelines** is fulfi
 | :--- | :--- | :--- |
 | 📦 **Installable APK** | Pre-compiled, installable Android debug APK ready for evaluation | **[FlowPilot-v1.0-debug.apk](FlowPilot-v1.0-debug.apk)** |
 | 🎬 **Demo Video (≤ 5 min)** | Official 5-part unedited video (Teach, Exact Replay, Paraphrase, Slot Variation, Stuck Query) | **[Watch Official Demo Video (Google Drive)](https://drive.google.com/drive/folders/1Rt1xt2NEt5b5ghA3HExw9LYlbmGPr-cC?usp=sharing)** |
-| 📊 **Official Pitch Deck** | Official submission presentation file (`CollegeName_TeamName_Submission_ppt`) | **[SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx](SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)** |
+| 📊 **Official Pitch Deck** | Official submission presentation file (`CollegeName_TeamName_Submission_ppt`) | **[SRMUniversity_Cheesecake_Submission.pptx](SRMUniversity_Cheesecake_Submission.pptx)** |
 | 📋 **Evaluation Compliance** | Point-by-point compliance against test cases T1–T14 and bonus points | **[docs/EVALUATION_CRITERIA.md](docs/EVALUATION_CRITERIA.md)** |
 | 📝 **AI Usage Disclosure** | Official LangAI 3.0 AI Usage Disclosure & Compliance Form | **[AI_DISCLOSURE.md](AI_DISCLOSURE.md)** |
 | 🏆 **Pitch & Demo Guide** | 30-sec elevator pitch, 5-part unedited live demo script, and judge Q&A | **[docs/HACKATHON_PITCH.md](docs/HACKATHON_PITCH.md)** |

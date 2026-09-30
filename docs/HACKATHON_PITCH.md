@@ -4,7 +4,7 @@
 > **Institution**: SRM University, Kattankulathur  
 > **Team**: Cheesecake  
 > **Solution**: FlowPilot — Learn-Once, Replay-Anywhere Voice Automation for Android  
-> **Presentation Deck**: [`SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx`](../SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx)  
+> **Presentation Deck**: [`SRMUniversity_Cheesecake_Submission.pptx`](../SRMUniversity_Cheesecake_Submission.pptx)  
 
 ---
 
