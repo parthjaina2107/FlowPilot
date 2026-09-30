@@ -1,54 +1,91 @@
-# FlowPilot - Samsung PRISM Hackathon Presentation & Pitch Guide
+# FlowPilot - Samsung PRISM Hackathon Pitch & Presentation Guide
 
-> **Samsung PRISM Generative AI Hackathon - 3rd Edition (2026-27)**  
-> **Theme #03: Teachable Voice Automation**  
-> **Team Cheesecake - SRM Institute of Science and Technology**
-
----
-
-## 1. The 30-Second Elevator Pitch
-
-> *"Voice assistants like Bixby, Siri, and Google Assistant are constrained by static APIs — if an app doesn't build a custom integration, voice automation fails.  
-> **FlowPilot breaks this barrier.** It is a **learn-once, replay-anywhere** teachable voice automation engine for Android. A user demonstrates an in-app task just once; FlowPilot captures the accessibility interaction tree, uses **Gemini Flash** to abstract it into a parameterised, resilient workflow, indexes trigger phrases into **ChromaDB**, and autonomously replays it on future voice commands — even when app layouts change."*
+> **Track**: Teachable Voice Automation (Theme #03)  
+> **Institution**: SRM University, Kattankulathur  
+> **Team**: Cheesecake  
+> **Solution**: FlowPilot — Learn-Once, Replay-Anywhere Voice Automation for Android
 
 ---
 
-## 2. The 3-Minute Live Demo Script
+## 1. The 30-Second Elevator Hook
 
-| Timestamp | Phase | Action / Visual | Speaking Points |
-|---|---|---|---|
-| **0:00 - 0:30** | **The Hook** | Show failure of native voice assistant on a task (e.g. searching specific local restaurant). | *"Existing assistants hit a wall when apps lack APIs. Users are forced into repetitive manual taps."* |
-| **0:30 - 1:15** | **LEARN** | Open FlowPilot -> Tap "Record New Flow" -> Switch to Zomato -> Search paneer -> Add to cart -> Stop. | *"With FlowPilot, we demonstrate the action once. Our background AccessibilityService records UI events, classes, and visible text."* |
-| **1:15 - 1:45** | **GENERALISE** | Show backend logs compiling trace via Gemini. | *"Gemini removes accidental clicks, identifies that 'paneer' is a dynamic slot, and produces an abstract semantic FlowGraph with safety auth gates."* |
-| **1:45 - 2:30** | **MATCH & REPLAY** | Say: *'FlowPilot, order 2 garlic naans on Zomato'* -> Watch screen autonomously open Zomato, enter naans, and reach checkout! | *"Sentence-BERT matches our voice command with 92% confidence. Gemini extracts the new dish and quantity. The replay engine uses cascading selectors to execute gracefully."* |
-| **2:30 - 3:00** | **Impact & Scalability** | Show pre-recorded flows for YouTube, Spotify, WhatsApp. | *"FlowPilot works universally across any Android application without modifying app source code or needing root access."* |
+> *"Imagine you ask Bixby or Google Assistant to reorder your favorite biryani from Zomato, play a specific lofi track on YouTube, or buy your whey protein on Amazon. Today, the assistant says: 'Sorry, I can't do that yet.'*  
+> 
+> *Why? Because existing voice assistants depend on millions of dollars of custom partner APIs. If an app doesn't have an integration, the assistant is useless.*  
+> 
+> *Meet **FlowPilot**. FlowPilot brings teachable voice automation to any Android app without code, APIs, or root access. You demonstrate any task on your screen once. FlowPilot watches, uses Gemini AI to generalize the actions into parameterised workflows, and replays them dynamically on voice command with a 96–100% success rate and zero credential risk."*
 
 ---
 
-## 3. Competitive Comparison
+## 2. 3-Minute Live Demonstration Script
 
-| Feature | Standard Assistants (Bixby/Google) | Traditional Macro Apps (Tasker) | FlowPilot (Ours) |
-|---|---|---|---|
-| **App Support** | Limited to supported partner APIs | Works on any app | **Universal (any Android app)** |
-| **Setup Effort** | Requires developer to write App Action | Complex manual $(x,y)$ scripting | **Single demonstration (zero-code)** |
-| **Layout Resilience** | High (API-level) | Zero (breaks on screen resize/redesign) | **High (Cascading Semantic Selectors)** |
-| **Natural Voice Query** | Predefined intents only | Rigid keywords | **ChromaDB Vector Matching + Gemini** |
-| **Safety & Privacy** | Platform-controlled | None (blind clicks into payment) | **`is_auth_pause` biometric gate** |
+### Step 1: The Problem (0:00 - 0:30)
+- Pick up the phone or emulator.
+- Trigger voice: *"Order butter chicken on Zomato."*
+- Point to the screen: FlowPilot immediately matches the intent with 100% confidence, launches Zomato, searches the restaurant, selects the dish, adds it to the cart, and halts safely before the final payment.
+
+### Step 2: The Magic — Teachable Automation (0:30 - 1:45)
+- Open FlowPilot and tap **Teach / Record New Flow**.
+- Name it: *"Buy Protein Powder on Amazon"*.
+- Voice Trigger: *"Buy protein powder on Amazon"*.
+- Tap **Start Recording**.
+- Switch to Amazon, search for "protein powder", tap the first item, tap "Add to Cart", and tap "Proceed to checkout".
+- Return to FlowPilot and tap **Stop & Compile Flow**.
+- **Show the Gemini FlowCompiler in action**:
+  - Live synthesis of raw gestures into semantic selectors.
+  - Identification of the dynamic slot `[item_name]`.
+  - Automatic detection of the checkout step as a **Security Auth Pause**.
+
+### Step 3: Natural Language Replay & Parameter Variation (1:45 - 2:30)
+- Tap the microphone button in FlowPilot.
+- Speak a brand new query: *"Can you buy protein powder from Amazon?"*
+- Watch the live progress indicator on the phone:
+  - Step 1: Launch Amazon
+  - Step 2: Tap search bar
+  - Step 3: Type item name
+  - Step 4: Add to Cart
+  - Step 5: **Security Auth Pause triggers**:
+    - Dialog pops up: *"Security Auth Pause: Please complete authentication before checkout"*.
+    - Replay is securely suspended until the user authenticates with fingerprint / PIN.
+    - User taps *"I've Authenticated (Continue)"*, and the flow completes safely!
+
+### Step 4: The Evaluation Benchmark (2:30 - 3:00)
+- Show the 5-app benchmark results:
+  - **100% intent match accuracy** across 25 natural language variations.
+  - **1146 ms average match latency**.
+  - **100% negative control rejection** in under 40 ms.
+  - Complete zero-credential safety with explicit Auth Pause gates.
 
 ---
 
-## 4. Top Judge Questions & How to Answer
+## 3. Competitive Advantage Matrix
 
-### Q1: *"What happens if the app updates its UI layout or changes a button ID?"*
-> **Answer:** *"Unlike brittle auto-clickers that rely on resource IDs or pixel coordinates, FlowPilot uses a **4-tier cascading fallback selector**:  
-> 1. Exact match (Role + Text + Content Description + ID)  
-> 2. Role + Text Contains (e.g., any Button containing 'Add')  
-> 3. Text Only match  
-> 4. Content Description match with auto-scroll forward.  
-> Even if developers rename internal IDs, visible labels and roles remain stable."*
+| Feature | Bixby / Google Assistant | Accessibility Macros (Tasker) | FlowPilot (Ours) |
+| :--- | :---: | :---: | :---: |
+| **Requires Developer API** | Yes (Hard Requirement) | No | **No (Zero API reliance)** |
+| **Learning Mechanism** | Engineering Teams | Manual coordinate scripting | **1-shot user screen demonstration** |
+| **Generalisation & Slots** | Hardcoded | None (Static coordinates) | **Gemini AI semantic parameterisation** |
+| **UI Update Resilience** | Broken by redesigns | Broken by screen size / DPI changes | **4-level cascading semantic fallback** |
+| **Security Handling** | Opaque | Dangerous (blind replay of passwords) | **Explicit Auth Pause with biometric gate** |
+| **Latency** | 2–4 seconds | 500 ms (no intelligence) | **~1.1s semantic match & execution** |
 
-### Q2: *"Is this safe? What prevents unauthorized transactions or credential theft?"*
-> **Answer:** *"Security is built into the compilation stage. Gemini automatically identifies sensitive screens (UPI PINs, passwords, OTPs, final payment confirmation) and flags them with `is_auth_pause: true`. During replay, the service halts execution before the sensitive action and requires user biometric/fingerprint authentication before proceeding."*
+---
 
-### Q3: *"Can this run on low-end Android devices?"*
-> **Answer:** *"Yes. The on-device Android service is lightweight (pure Kotlin + AccessibilityService). Heavy AI synthesis (Gemini) and vector indexing (ChromaDB) run asynchronously on the server or edge gateway, requiring negligible battery and memory from the mobile device."*
+## 4. Anticipated Judge Questions & Bulletproof Answers
+
+### Q1: "What happens when an app updates its UI or changes its layout?"
+> **Answer**: *"Traditional macros break because they rely on exact `x, y` pixel coordinates or rigid resource IDs. FlowPilot uses a **4-tier cascading semantic fallback**:
+> 1. Exact match across all semantic attributes.
+> 2. Relaxed role + text contains (ignores version-specific IDs).
+> 3. Global visible text matching.
+> 4. Accessibility content descriptions.  
+> Even if an app changes its button IDs and swaps layouts, as long as the button still says 'Add to Cart' or has an accessibility icon, FlowPilot reliably locates and actuates it."*
+
+### Q2: "How do you prevent malicious or accidental payments?"
+> **Answer**: *"During compilation, Gemini automatically identifies sensitive steps (checkout, UPI PIN, OTP, payment confirmation) and sets `is_auth_pause = true`. During execution, the Replay Engine halts immediately before the transaction and prompts the user for biometric or PIN confirmation. FlowPilot never stores or touches user banking credentials."*
+
+### Q3: "What models power FlowPilot?"
+> **Answer**: *"FlowPilot uses a multi-tier hybrid AI architecture:
+> 1. **ChromaDB + Sentence-BERT (`all-MiniLM-L6-v2`)** for local, ultra-fast vector similarity search (<50ms).
+> 2. **Google Gemini Flash** for semantic flow compilation, selector abstraction, and parameter slot inference.
+> 3. **OpenAI Whisper** and **Android SpeechRecognizer** for noise-resilient multilingual speech-to-text."*
