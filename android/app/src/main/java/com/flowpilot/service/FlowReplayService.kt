@@ -5,11 +5,13 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.core.app.NotificationCompat
 import com.flowpilot.FlowPilotApp
 import com.flowpilot.model.FlowGraph
 import com.flowpilot.model.FlowStep
+import com.flowpilot.network.ApiClient
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 
@@ -23,7 +25,7 @@ import kotlinx.serialization.json.Json
  * 1. Exact match (all selector fields)
  * 2. Relaxed text (role + text_contains)
  * 3. Relaxed role (text only)
- * 4. Fail with logging
+ * 4. Content description match
  */
 class FlowReplayService : AccessibilityService() {
 
@@ -31,14 +33,30 @@ class FlowReplayService : AccessibilityService() {
         private const val TAG = "FlowReplay"
         const val ACTION_REPLAY = "com.flowpilot.START_REPLAY"
         const val ACTION_CANCEL = "com.flowpilot.CANCEL_REPLAY"
+        const val ACTION_REPLAY_STEP = "com.flowpilot.REPLAY_STEP"
         const val ACTION_REPLAY_DONE = "com.flowpilot.REPLAY_DONE"
+        const val ACTION_AUTH_PAUSE = "com.flowpilot.AUTH_PAUSE"
+        const val ACTION_AUTH_RESUME = "com.flowpilot.AUTH_RESUME"
+        const val ACTION_AUTH_CANCEL = "com.flowpilot.AUTH_CANCEL"
+
         const val EXTRA_FLOW_JSON = "flow_json"
         const val EXTRA_PARAMS_JSON = "params_json"
         const val EXTRA_SUCCESS = "success"
+        const val EXTRA_STEP_INDEX = "step_index"
+        const val EXTRA_TOTAL_STEPS = "total_steps"
+        const val EXTRA_STEP_DESC = "step_desc"
+        const val EXTRA_FLOW_NAME = "flow_name"
+
         private const val NOTIFICATION_ID = 2001
 
         var isReplaying = false
             private set
+
+        private var authDeferred: CompletableDeferred<Boolean>? = null
+
+        fun resumeAuth(proceed: Boolean) {
+            authDeferred?.complete(proceed)
+        }
     }
 
     private var replayJob: Job? = null
@@ -48,7 +66,7 @@ class FlowReplayService : AccessibilityService() {
         Log.w(TAG, "⚠️ FlowReplayService interrupted")
     }
 
-    override fun onAccessibilityEvent(event: android.view.accessibility.AccessibilityEvent?) {
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // Not used during replay — we drive actions proactively
     }
 
@@ -60,14 +78,25 @@ class FlowReplayService : AccessibilityService() {
                 startReplay(flowJson, paramsJson)
             }
             ACTION_CANCEL -> cancelReplay()
+            ACTION_AUTH_RESUME -> resumeAuth(true)
+            ACTION_AUTH_CANCEL -> resumeAuth(false)
         }
         return START_STICKY
     }
 
     private fun startReplay(flowJson: String, paramsJson: String) {
-        val json = Json { ignoreUnknownKeys = true }
-        val flow = json.decodeFromString<FlowGraph>(flowJson)
-        val params: Map<String, String> = json.decodeFromString(paramsJson)
+        val flow = try {
+            ApiClient.gson.fromJson(flowJson, FlowGraph::class.java)
+        } catch (e: Exception) {
+            Json { ignoreUnknownKeys = true }.decodeFromString<FlowGraph>(flowJson)
+        }
+
+        val type = object : com.google.gson.reflect.TypeToken<Map<String, String>>() {}.type
+        val params: Map<String, String> = try {
+            ApiClient.gson.fromJson(paramsJson, type) ?: emptyMap()
+        } catch (e: Exception) {
+            Json { ignoreUnknownKeys = true }.decodeFromString(paramsJson)
+        }
 
         isReplaying = true
         Log.i(TAG, "▶️ Replaying '${flow.flowName}' with params: $params")
@@ -79,6 +108,7 @@ class FlowReplayService : AccessibilityService() {
 
     private fun cancelReplay() {
         replayJob?.cancel()
+        authDeferred?.complete(false)
         isReplaying = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         Log.i(TAG, "❌ Replay cancelled")
@@ -99,23 +129,34 @@ class FlowReplayService : AccessibilityService() {
 
             showReplayNotification(
                 "Step ${step.stepIndex + 1}/${flow.steps.size}: ${step.description}",
-                step.stepIndex,
+                step.stepIndex + 1,
                 flow.steps.size
             )
+
+            // Broadcast step execution for UI updates
+            val stepIntent = Intent(ACTION_REPLAY_STEP).apply {
+                putExtra(EXTRA_STEP_INDEX, step.stepIndex)
+                putExtra(EXTRA_TOTAL_STEPS, flow.steps.size)
+                putExtra(EXTRA_STEP_DESC, step.description)
+                putExtra(EXTRA_FLOW_NAME, flow.flowName)
+                setPackage(packageName)
+            }
+            sendBroadcast(stepIntent)
 
             // Wait before step
             delay(step.waitAfterMs.toLong())
 
-            val success = executeStep(step, flow.targetAppPackage, params)
+            val success = executeStep(step, flow, params)
             if (success) successCount++ else failCount++
         }
 
         isReplaying = false
         stopForeground(STOP_FOREGROUND_REMOVE)
 
-        // Broadcast result
+        // Broadcast completion result
         val doneIntent = Intent(ACTION_REPLAY_DONE).apply {
-            putExtra(EXTRA_SUCCESS, failCount == 0)
+            putExtra(EXTRA_SUCCESS, failCount == 0 && successCount > 0)
+            putExtra(EXTRA_FLOW_NAME, flow.flowName)
             setPackage(packageName)
         }
         sendBroadcast(doneIntent)
@@ -123,24 +164,64 @@ class FlowReplayService : AccessibilityService() {
         Log.i(TAG, "✅ Replay done: $successCount succeeded, $failCount failed")
     }
 
-    private suspend fun executeStep(step: FlowStep, targetPackage: String, params: Map<String, String>): Boolean {
+    private suspend fun executeStep(
+        step: FlowStep,
+        flow: FlowGraph,
+        params: Map<String, String>
+    ): Boolean {
+        // Handle Security / Auth Pause (PPT Slide 6 & 10)
+        if (step.isAuthPause) {
+            Log.i(TAG, "🔒 AUTH PAUSE triggered on step ${step.stepIndex}: ${step.description}")
+            showAuthPauseNotification(step.description)
+
+            val authIntent = Intent(ACTION_AUTH_PAUSE).apply {
+                putExtra(EXTRA_STEP_DESC, step.description)
+                putExtra(EXTRA_FLOW_NAME, flow.flowName)
+                putExtra(EXTRA_STEP_INDEX, step.stepIndex)
+                setPackage(packageName)
+            }
+            sendBroadcast(authIntent)
+
+            val deferred = CompletableDeferred<Boolean>()
+            authDeferred = deferred
+
+            val confirmed = try {
+                withTimeout(60000L) {
+                    deferred.await()
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "Auth pause timed out after 60s")
+                false
+            } finally {
+                authDeferred = null
+            }
+
+            if (!confirmed) {
+                Log.i(TAG, "User cancelled or auth timed out during auth pause.")
+                return false
+            }
+
+            Log.i(TAG, "User completed authentication. Resuming replay.")
+            delay(1500)
+        }
+
         return when (step.actionType) {
             "open_app" -> {
-                val launchIntent = packageManager.getLaunchIntentForPackage(targetPackage)
+                val launchIntent = packageManager.getLaunchIntentForPackage(flow.targetAppPackage)
                 if (launchIntent != null) {
                     launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     startActivity(launchIntent)
                     delay(3000) // Wait for app to load
                     true
                 } else {
-                    Log.e(TAG, "  ❌ Cannot launch $targetPackage")
+                    Log.e(TAG, "  ❌ Cannot launch ${flow.targetAppPackage}")
                     false
                 }
             }
-            "click" -> performClick(step)
+            "click" -> performClick(step, params)
             "type" -> performType(step, params)
             "scroll" -> performScroll(step)
-            "long_press" -> performClick(step) // Simplified — use click for now
+            "long_press" -> performClick(step, params)
             "wait" -> {
                 delay(step.waitAfterMs.toLong())
                 true
@@ -153,11 +234,35 @@ class FlowReplayService : AccessibilityService() {
     }
 
     // ─────────────────────────────────────────────
+    // Dynamic Parameter Injection into Selectors
+    // ─────────────────────────────────────────────
+
+    private fun resolveSelector(
+        selector: Map<String, String>,
+        step: FlowStep,
+        params: Map<String, String>
+    ): Map<String, String> {
+        val paramSlot = step.parameterSlot ?: return selector
+        val paramVal = params[paramSlot] ?: return selector
+        val defaultVal = step.defaultValue
+        if (defaultVal.isNullOrBlank()) return selector
+
+        return selector.mapValues { (_, value) ->
+            if (value.contains(defaultVal, ignoreCase = true)) {
+                value.replace(defaultVal, paramVal, ignoreCase = true)
+            } else {
+                value
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────
     // Action executors
     // ─────────────────────────────────────────────
 
-    private suspend fun performClick(step: FlowStep): Boolean {
-        val node = findElementWithRetry(step.selector) ?: return false
+    private suspend fun performClick(step: FlowStep, params: Map<String, String>): Boolean {
+        val resolvedSelector = resolveSelector(step.selector, step, params)
+        val node = findElementWithRetry(resolvedSelector) ?: return false
         val result = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         if (!result) {
             // Try clicking parent
@@ -168,7 +273,8 @@ class FlowReplayService : AccessibilityService() {
     }
 
     private suspend fun performType(step: FlowStep, params: Map<String, String>): Boolean {
-        val node = findElementWithRetry(step.selector) ?: return false
+        val resolvedSelector = resolveSelector(step.selector, step, params)
+        val node = findElementWithRetry(resolvedSelector) ?: return false
 
         // Determine text to type
         val text = if (step.parameterSlot != null) {
@@ -217,31 +323,25 @@ class FlowReplayService : AccessibilityService() {
             Log.d(TAG, "  🔍 Element not found (attempt $attempt/$maxRetries)")
             delay(1000)
 
-            // On last retry, try scrolling
+            // On last retry, try scrolling to bring element into view
             if (attempt == maxRetries - 1) {
-                val scrollable = findScrollableNode(root)
-                scrollable?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                delay(1000)
+                rootInActiveWindow?.let { r ->
+                    findScrollableNode(r)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+                    delay(1000)
+                }
             }
         }
-        Log.e(TAG, "  ❌ Element not found after $maxRetries attempts: $selector")
         return null
     }
 
-    /**
-     * Cascading fallback element finder:
-     * 1. Exact match (all selector fields)
-     * 2. Role + text_contains
-     * 3. Text only
-     */
-    fun findElement(root: AccessibilityNodeInfo, selector: Map<String, String>): AccessibilityNodeInfo? {
+    private fun findElement(root: AccessibilityNodeInfo, selector: Map<String, String>): AccessibilityNodeInfo? {
         val role = selector["role"]
         val textContains = selector["text_contains"]
         val textEquals = selector["text_equals"]
         val descContains = selector["content_description_contains"]
         val idContains = selector["resource_id_contains"]
 
-        // Strategy 1: Exact match
+        // Level 1: Exact match (all specified criteria)
         findNodeRecursive(root) { node ->
             matchesRole(node, role) &&
             matchesText(node, textContains, textEquals) &&
@@ -249,25 +349,34 @@ class FlowReplayService : AccessibilityService() {
             matchesId(node, idContains)
         }?.let { return it }
 
-        // Strategy 2: Role + text only
-        if (role != null && (textContains != null || textEquals != null)) {
+        // Level 2: Relaxed text (role + text_contains only)
+        if (textContains != null || textEquals != null) {
             findNodeRecursive(root) { node ->
                 matchesRole(node, role) && matchesText(node, textContains, textEquals)
-            }?.let { return it }
+            }?.let {
+                Log.d(TAG, "  ⚡ Level 2 fallback match: role=$role, text=$textContains")
+                return it
+            }
         }
 
-        // Strategy 3: Text only
+        // Level 3: Text only (ignore role)
         if (textContains != null || textEquals != null) {
             findNodeRecursive(root) { node ->
                 matchesText(node, textContains, textEquals)
-            }?.let { return it }
+            }?.let {
+                Log.d(TAG, "  ⚡ Level 3 fallback match: text=$textContains")
+                return it
+            }
         }
 
-        // Strategy 4: Content description only
+        // Level 4: Content description only
         if (descContains != null) {
             findNodeRecursive(root) { node ->
                 matchesDescription(node, descContains)
-            }?.let { return it }
+            }?.let {
+                Log.d(TAG, "  ⚡ Level 4 fallback match: desc=$descContains")
+                return it
+            }
         }
 
         return null
@@ -328,7 +437,7 @@ class FlowReplayService : AccessibilityService() {
     }
 
     // ─────────────────────────────────────────────
-    // Notification
+    // Notifications
     // ─────────────────────────────────────────────
 
     private fun showReplayNotification(text: String, current: Int, total: Int) {
@@ -352,9 +461,40 @@ class FlowReplayService : AccessibilityService() {
         startForeground(NOTIFICATION_ID, notification)
     }
 
+    private fun showAuthPauseNotification(stepDesc: String) {
+        val resumeIntent = Intent(this, FlowReplayService::class.java).apply {
+            action = ACTION_AUTH_RESUME
+        }
+        val resumePending = PendingIntent.getService(
+            this, 1, resumeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val cancelIntent = Intent(this, FlowReplayService::class.java).apply {
+            action = ACTION_AUTH_CANCEL
+        }
+        val cancelPending = PendingIntent.getService(
+            this, 2, cancelIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, FlowPilotApp.CHANNEL_REPLAY)
+            .setContentTitle("FlowPilot Security Pause 🔒")
+            .setContentText("Complete authentication: $stepDesc")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addAction(android.R.drawable.ic_media_play, "I've Done It (Continue)", resumePending)
+            .addAction(android.R.drawable.ic_delete, "Cancel Flow", cancelPending)
+            .build()
+
+        startForeground(NOTIFICATION_ID, notification)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         replayJob?.cancel()
+        authDeferred?.complete(false)
         scope.cancel()
     }
 }
