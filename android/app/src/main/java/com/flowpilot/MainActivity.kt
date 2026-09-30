@@ -1,5 +1,6 @@
 package com.flowpilot
 
+import android.app.Activity
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -27,7 +28,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -222,6 +229,118 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         }
     }
 
+    // Function to process matched voice command
+    fun executeVoiceCommand(text: String) {
+        recognizedText = text
+
+        // T14 Reporting: Check if user asks about status of previous run
+        val lower = text.lowercase().trim()
+        if (lower.contains("did the last run succeed") || lower.contains("last run status") || lower.contains("did it succeed") || lower.contains("status of last run")) {
+            val lastSuccess = FlowReplayService.lastRunSuccess
+            val lastFlow = FlowReplayService.lastRunFlowName
+            val lastStep = FlowReplayService.lastRunHaltedStep
+            val lastReason = FlowReplayService.lastRunReason
+
+            voiceState = if (lastSuccess == true) VoiceState.DONE else VoiceState.ERROR
+            val report = when (lastSuccess) {
+                true -> "Last run '$lastFlow' SUCCEEDED! All $lastStep steps finished successfully 🎉"
+                false -> "Last run '$lastFlow' STOPPED at step $lastStep: $lastReason"
+                else -> "No flow has been executed yet in this session."
+            }
+            statusMessage = report
+            speak(report)
+            FeedbackManager.speak(report)
+            return
+        }
+
+        voiceState = VoiceState.PROCESSING
+        statusMessage = "Matching '$text' against FlowPilot flows..."
+
+        // Call backend matching endpoint
+        scope.launch {
+            try {
+                val res = ApiClient.api.matchTextCommand(mapOf("command" to text))
+                matchResult = res
+
+                if (res.matched && res.flowGraph != null) {
+                    // T13: Ambiguity Resolution — ask or confirm before executing
+                    if (res.isAmbiguous) {
+                        voiceState = VoiceState.MATCHED
+                        val prompt = res.clarificationPrompt ?: "Clarification needed"
+                        statusMessage = prompt
+                        ambiguityPrompt = prompt
+                        ambiguityOptions = res.ambiguityOptions ?: listOf(res.flowName ?: "Confirm")
+                        pendingAmbiguousMatch = res
+                        showAmbiguityDialog = true
+                        speak(prompt)
+                        FeedbackManager.speak(prompt)
+                        return@launch
+                    }
+
+                    voiceState = VoiceState.MATCHED
+                    statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
+                    speak("Executing ${res.flowName}")
+                    FeedbackManager.speak("Executing ${res.flowName}")
+
+                    delay(1000)
+
+                    // Trigger Replay Service
+                    voiceState = VoiceState.REPLAYING
+                    replayFlowName = res.flowName ?: ""
+                    replayTotalSteps = res.flowGraph.steps.size
+                    replayCurrentStep = 0
+
+                    val flowParams = res.parameters ?: emptyMap()
+                    val replayService = FlowReplayService.instance
+                    if (replayService != null) {
+                        replayService.startReplayDirect(res.flowGraph, flowParams)
+                    } else {
+                        val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                            action = FlowReplayService.ACTION_REPLAY
+                            putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(res.flowGraph))
+                            putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(flowParams))
+                        }
+                        try {
+                            context.startService(replayIntent)
+                        } catch (e: Exception) {
+                            Log.e("FlowPilot", "Failed to start service", e)
+                        }
+                    }
+                } else {
+                    voiceState = VoiceState.NO_MATCH
+                    val msg = res.suggestion ?: "No matching flow found. Record a new flow first!"
+                    statusMessage = msg
+                    speak(msg)
+                    FeedbackManager.speak(msg)
+                }
+            } catch (e: Exception) {
+                Log.e("FlowPilot", "Match error", e)
+                voiceState = VoiceState.ERROR
+                statusMessage = "Failed to reach backend: ${e.localizedMessage}"
+                speak("Could not reach backend server.")
+                FeedbackManager.speak("Could not reach backend server.")
+            }
+        }
+    }
+
+    // System speech recognizer dialog launcher (reliable on emulators/devices without speech service)
+    val speechIntentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val spoken = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            if (!spoken.isNullOrEmpty()) {
+                executeVoiceCommand(spoken[0])
+            } else {
+                voiceState = VoiceState.IDLE
+                statusMessage = "No speech detected. Tap mic or type below."
+            }
+        } else {
+            voiceState = VoiceState.IDLE
+            statusMessage = "Tap mic, choose a quick prompt, or type below."
+        }
+    }
+
     // Function to start voice recognition
     fun startListening() {
         if (!FlowReplayService.isRunning) {
@@ -233,165 +352,94 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             return
         }
 
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            Toast.makeText(context, "Speech recognition not available on this device", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        speechRecognizer?.destroy()
-        val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-        speechRecognizer = recognizer
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a FlowPilot voice command...")
         }
 
-        recognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                voiceState = VoiceState.LISTENING
-                statusMessage = "Listening... Speak now"
-                recognizedText = ""
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            try {
+                speechIntentLauncher.launch(speechIntent)
+                return
+            } catch (e: Exception) {
+                statusMessage = "Speech recognizer unavailable. Type your command below."
+                return
             }
+        }
 
-            override fun onBeginningOfSpeech() {
-                statusMessage = "Hearing your voice..."
+        try {
+            speechRecognizer?.destroy()
+            val recognizer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+            } else {
+                SpeechRecognizer.createSpeechRecognizer(context)
             }
+            speechRecognizer = recognizer
 
-            override fun onRmsChanged(rmsdB: Float) {
-                rmsLevel = rmsdB
-            }
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                voiceState = VoiceState.PROCESSING
-                statusMessage = "Processing voice input..."
-            }
-
-            override fun onError(error: Int) {
-                voiceState = VoiceState.IDLE
-                statusMessage = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Try again."
-                    SpeechRecognizer.ERROR_NETWORK -> "Network error during speech recognition."
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard. Tap to retry."
-                    else -> "Speech error ($error). Tap to retry."
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    voiceState = VoiceState.LISTENING
+                    statusMessage = "Listening... Speak now 🎙️"
+                    recognizedText = ""
                 }
-            }
 
-            override fun onResults(results: Bundle?) {
-                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!matches.isNullOrEmpty()) {
-                    val text = matches[0]
-                    recognizedText = text
+                override fun onBeginningOfSpeech() {
+                    statusMessage = "Hearing your voice..."
+                }
 
-                    // T14 Reporting: Check if user asks about status of previous run
-                    val lower = text.lowercase().trim()
-                    if (lower.contains("did the last run succeed") || lower.contains("last run status") || lower.contains("did it succeed") || lower.contains("status of last run")) {
-                        val lastSuccess = FlowReplayService.lastRunSuccess
-                        val lastFlow = FlowReplayService.lastRunFlowName
-                        val lastStep = FlowReplayService.lastRunHaltedStep
-                        val lastReason = FlowReplayService.lastRunReason
+                override fun onRmsChanged(rmsdB: Float) {
+                    rmsLevel = rmsdB
+                }
 
-                        voiceState = if (lastSuccess == true) VoiceState.DONE else VoiceState.ERROR
-                        val report = when (lastSuccess) {
-                            true -> "Last run '$lastFlow' SUCCEEDED! All $lastStep steps finished successfully 🎉"
-                            false -> "Last run '$lastFlow' STOPPED at step $lastStep: $lastReason"
-                            else -> "No flow has been executed yet in this session."
-                        }
-                        statusMessage = report
-                        speak(report)
-                        FeedbackManager.speak(report)
-                        return
-                    }
+                override fun onBufferReceived(buffer: ByteArray?) {}
 
+                override fun onEndOfSpeech() {
                     voiceState = VoiceState.PROCESSING
-                    statusMessage = "Matching '$text' against FlowPilot flows..."
+                    statusMessage = "Processing voice input..."
+                }
 
-                    // Call backend matching endpoint
-                    scope.launch {
-                        try {
-                            val res = ApiClient.api.matchTextCommand(mapOf("command" to text))
-                            matchResult = res
-
-                            if (res.matched && res.flowGraph != null) {
-                                // T13: Ambiguity Resolution — ask or confirm before executing
-                                if (res.isAmbiguous) {
-                                    voiceState = VoiceState.MATCHED
-                                    val prompt = res.clarificationPrompt ?: "Clarification needed"
-                                    statusMessage = prompt
-                                    ambiguityPrompt = prompt
-                                    ambiguityOptions = res.ambiguityOptions ?: listOf(res.flowName ?: "Confirm")
-                                    pendingAmbiguousMatch = res
-                                    showAmbiguityDialog = true
-                                    speak(prompt)
-                                    FeedbackManager.speak(prompt)
-                                    return@launch
-                                }
-
-                                voiceState = VoiceState.MATCHED
-                                statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
-                                speak("Executing ${res.flowName}")
-                                FeedbackManager.speak("Executing ${res.flowName}")
-
-                                delay(1000)
-
-                                // Trigger Replay Service
-                                voiceState = VoiceState.REPLAYING
-                                replayFlowName = res.flowName ?: ""
-                                replayTotalSteps = res.flowGraph.steps.size
-                                replayCurrentStep = 0
-
-                                val flowParams = res.parameters ?: emptyMap()
-                                val replayService = FlowReplayService.instance
-                                if (replayService != null) {
-                                    replayService.startReplayDirect(res.flowGraph, flowParams)
-                                } else {
-                                    val replayIntent = Intent(context, FlowReplayService::class.java).apply {
-                                        action = FlowReplayService.ACTION_REPLAY
-                                        putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(res.flowGraph))
-                                        putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(flowParams))
-                                    }
-                                    try {
-                                        context.startService(replayIntent)
-                                    } catch (e: Exception) {
-                                        Log.e("FlowPilot", "Failed to start service", e)
-                                    }
-                                }
-                            } else {
-                                voiceState = VoiceState.NO_MATCH
-                                val msg = res.suggestion ?: "No matching flow found. Record a new flow first!"
-                                statusMessage = msg
-                                speak(msg)
-                                FeedbackManager.speak(msg)
-                            }
-                        } catch (e: Exception) {
-                            Log.e("FlowPilot", "Match error", e)
-                            voiceState = VoiceState.ERROR
-                            statusMessage = "Failed to reach backend: ${e.localizedMessage}"
-                            speak("Could not reach backend server.")
-                            FeedbackManager.speak("Could not reach backend server.")
-                        }
-                    }
-                } else {
+                override fun onError(error: Int) {
                     voiceState = VoiceState.IDLE
-                    statusMessage = "Didn't catch that. Tap to try again."
+                    statusMessage = when (error) {
+                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Tap mic, tap a quick prompt, or type below."
+                        SpeechRecognizer.ERROR_NETWORK -> "Network error during speech recognition. Tap a quick prompt or type below."
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard. Tap mic or select a prompt below."
+                        else -> "Speech error ($error). Tap a quick prompt or type below."
+                    }
                 }
-            }
 
-            override fun onPartialResults(partialResults: Bundle?) {
-                val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!partial.isNullOrEmpty()) {
-                    recognizedText = partial[0]
+                override fun onResults(results: Bundle?) {
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty()) {
+                        executeVoiceCommand(matches[0])
+                    } else {
+                        voiceState = VoiceState.IDLE
+                        statusMessage = "Didn't catch that. Tap to try again or type below."
+                    }
                 }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!partial.isNullOrEmpty()) {
+                        recognizedText = partial[0]
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+
+            recognizer.startListening(speechIntent)
+        } catch (e: Exception) {
+            Log.e("FlowPilot", "SpeechRecognizer failed: ${e.message}", e)
+            try {
+                speechIntentLauncher.launch(speechIntent)
+            } catch (ex: Exception) {
+                statusMessage = "Speech recognizer unavailable. Type your command below."
             }
-
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        recognizer.startListening(intent)
+        }
     }
 
     // Register BroadcastReceiver for Replay events (Step Progress, Auth Pause, Done)
@@ -473,6 +521,8 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         label = "pulse"
     )
 
+    var textCommandInput by remember { mutableStateOf("") }
+
     Scaffold(
         containerColor = DarkBg,
         topBar = {
@@ -512,9 +562,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(horizontal = 24.dp, vertical = 16.dp),
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // Top: Status Banner
             Card(
@@ -619,14 +670,14 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             // Center: Big Interactive Mic Button
             Box(
                 modifier = Modifier
-                    .size(160.dp),
+                    .size(150.dp),
                 contentAlignment = Alignment.Center
             ) {
                 // Outer pulsing glow
                 if (voiceState == VoiceState.LISTENING) {
                     Box(
                         modifier = Modifier
-                            .size(160.dp)
+                            .size(150.dp)
                             .scale(pulseScale)
                             .clip(CircleShape)
                             .background(SamsungLightBlue.copy(alpha = 0.25f))
@@ -636,7 +687,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                 // Inner Main Button
                 Box(
                     modifier = Modifier
-                        .size(120.dp)
+                        .size(110.dp)
                         .clip(CircleShape)
                         .background(
                             Brush.radialGradient(
@@ -667,9 +718,88 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         },
                         contentDescription = "Voice command",
                         tint = Color.White,
-                        modifier = Modifier.size(54.dp)
+                        modifier = Modifier.size(50.dp)
                     )
                 }
+            }
+
+            // Quick Voice Prompts & Text Command Bar
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "Quick Voice Prompts",
+                    fontSize = 12.sp,
+                    color = TextSecondary,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val promptList = listOf(
+                        "▶️ Play lofi on YouTube" to "Play lofi hip hop on YouTube",
+                        "🍔 Order food on Zomato" to "Order butter chicken on Zomato",
+                        "📦 Buy on Amazon" to "Buy protein powder on Amazon",
+                        "🎵 Play on Spotify" to "Play Bohemian Rhapsody on Spotify",
+                        "💬 WhatsApp Mom" to "Send WhatsApp message to Mom"
+                    )
+                    items(promptList) { (label, command) ->
+                        SuggestionChip(
+                            onClick = { executeVoiceCommand(command) },
+                            label = { Text(label, fontSize = 12.sp, color = TextPrimary) },
+                            colors = SuggestionChipDefaults.suggestionChipColors(containerColor = CardBg),
+                            border = SuggestionChipDefaults.suggestionChipBorder(
+                                enabled = true,
+                                borderColor = SurfaceBg
+                            )
+                        )
+                    }
+                }
+
+                // Text Voice Command Input bar
+                OutlinedTextField(
+                    value = textCommandInput,
+                    onValueChange = { textCommandInput = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Or type voice command...", color = TextSecondary, fontSize = 13.sp) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = CardBg,
+                        unfocusedContainerColor = CardBg,
+                        focusedBorderColor = SamsungLightBlue,
+                        unfocusedBorderColor = SurfaceBg,
+                        focusedTextColor = TextPrimary,
+                        unfocusedTextColor = TextPrimary
+                    ),
+                    trailingIcon = {
+                        IconButton(
+                            onClick = {
+                                if (textCommandInput.isNotBlank()) {
+                                    val cmd = textCommandInput.trim()
+                                    textCommandInput = ""
+                                    executeVoiceCommand(cmd)
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Filled.Send, contentDescription = "Run", tint = SamsungLightBlue)
+                        }
+                    },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = {
+                            if (textCommandInput.isNotBlank()) {
+                                val cmd = textCommandInput.trim()
+                                textCommandInput = ""
+                                executeVoiceCommand(cmd)
+                            }
+                        }
+                    )
+                )
             }
 
             // Bottom Actions: Record New Flow & My Flows
