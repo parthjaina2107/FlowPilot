@@ -12,6 +12,7 @@ import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -174,6 +175,31 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var showServerConfigDialog by remember { mutableStateOf(false) }
     var serverUrlInput by remember { mutableStateOf(ApiClient.getBaseUrl()) }
 
+    // Text To Speech Engine (Voice Agent Persona)
+    var tts by remember { mutableStateOf<TextToSpeech?>(null) }
+    DisposableEffect(context) {
+        val t = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                t?.language = Locale.US
+            }
+        }
+        tts = t
+        onDispose {
+            try {
+                t.stop()
+                t.shutdown()
+            } catch (ignored: Exception) {}
+        }
+    }
+
+    fun speak(phrase: String) {
+        try {
+            tts?.speak(phrase, TextToSpeech.QUEUE_FLUSH, null, "flowpilot_voice")
+        } catch (e: Exception) {
+            Log.w("FlowPilot", "TTS error: ${e.message}")
+        }
+    }
+
     // Speech Recognizer instance
     var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var rmsLevel by remember { mutableFloatStateOf(0f) }
@@ -189,6 +215,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
 
     // Function to start voice recognition
     fun startListening() {
+        if (!FlowReplayService.isRunning) {
+            Toast.makeText(context, "⚠️ Please enable FlowPilot in Accessibility Settings first!", Toast.LENGTH_LONG).show()
+        }
+
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
@@ -257,11 +287,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         val lastReason = FlowReplayService.lastRunReason
 
                         voiceState = if (lastSuccess == true) VoiceState.DONE else VoiceState.ERROR
-                        statusMessage = when (lastSuccess) {
+                        val report = when (lastSuccess) {
                             true -> "Last run '$lastFlow' SUCCEEDED! All $lastStep steps finished successfully 🎉"
                             false -> "Last run '$lastFlow' STOPPED at step $lastStep: $lastReason"
                             else -> "No flow has been executed yet in this session."
                         }
+                        statusMessage = report
+                        speak(report)
                         return
                     }
 
@@ -278,18 +310,21 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 // T13: Ambiguity Resolution — ask or confirm before executing
                                 if (res.isAmbiguous) {
                                     voiceState = VoiceState.MATCHED
-                                    statusMessage = res.clarificationPrompt ?: "Clarification needed"
-                                    ambiguityPrompt = res.clarificationPrompt ?: "Did you mean to execute this flow?"
+                                    val prompt = res.clarificationPrompt ?: "Clarification needed"
+                                    statusMessage = prompt
+                                    ambiguityPrompt = prompt
                                     ambiguityOptions = res.ambiguityOptions ?: listOf(res.flowName ?: "Confirm")
                                     pendingAmbiguousMatch = res
                                     showAmbiguityDialog = true
+                                    speak(prompt)
                                     return@launch
                                 }
 
                                 voiceState = VoiceState.MATCHED
                                 statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
+                                speak("Starting ${res.flowName}")
 
-                                delay(1200)
+                                delay(1000)
 
                                 // Trigger Replay Service
                                 voiceState = VoiceState.REPLAYING
@@ -297,20 +332,33 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 replayTotalSteps = res.flowGraph.steps.size
                                 replayCurrentStep = 0
 
-                                val replayIntent = Intent(context, FlowReplayService::class.java).apply {
-                                    action = FlowReplayService.ACTION_REPLAY
-                                    putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(res.flowGraph))
-                                    putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(res.parameters ?: emptyMap<String, String>()))
+                                val flowParams = res.parameters ?: emptyMap()
+                                val replayService = FlowReplayService.instance
+                                if (replayService != null) {
+                                    replayService.startReplayDirect(res.flowGraph, flowParams)
+                                } else {
+                                    val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                                        action = FlowReplayService.ACTION_REPLAY
+                                        putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(res.flowGraph))
+                                        putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(flowParams))
+                                    }
+                                    try {
+                                        context.startService(replayIntent)
+                                    } catch (e: Exception) {
+                                        Log.e("FlowPilot", "Failed to start service", e)
+                                    }
                                 }
-                                context.startService(replayIntent)
                             } else {
                                 voiceState = VoiceState.NO_MATCH
-                                statusMessage = res.suggestion ?: "No matching flow found. Record a new flow first!"
+                                val msg = res.suggestion ?: "No matching flow found. Record a new flow first!"
+                                statusMessage = msg
+                                speak(msg)
                             }
                         } catch (e: Exception) {
                             Log.e("FlowPilot", "Match error", e)
                             voiceState = VoiceState.ERROR
                             statusMessage = "Failed to reach backend: ${e.localizedMessage}"
+                            speak("Could not connect to automation backend.")
                         }
                     }
                 } else {
@@ -349,11 +397,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         authPauseStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: "Security verification"
                         authPauseFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
                         showAuthPauseDialog = true
+                        speak("Security verification required. Please verify on screen.")
                     }
                     FlowReplayService.ACTION_REPLAY_DONE -> {
                         val success = intent.getBooleanExtra(FlowReplayService.EXTRA_SUCCESS, false)
                         voiceState = if (success) VoiceState.DONE else VoiceState.ERROR
                         statusMessage = if (success) "Flow automation completed successfully! 🎉" else "Replay encountered an issue."
+                        if (success) speak("Flow completed successfully!") else speak("Automation stopped.")
                     }
                     FlowReplayService.ACTION_REPLAY_STUCK -> {
                         stuckStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: "Unknown step"
@@ -362,6 +412,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         voiceState = VoiceState.ERROR
                         statusMessage = "FlowPilot got stuck at step $replayCurrentStep: $stuckStepDesc"
                         showStuckDialog = true
+                        speak("Automation stopped. $stuckReason")
                     }
                 }
             }
@@ -495,6 +546,50 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             color = TextSecondary,
                             fontSize = 12.sp
                         )
+                    }
+                }
+            }
+
+            // Accessibility Warning Banner
+            if (FlowReplayService.instance == null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = AccentOrange.copy(alpha = 0.15f)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, AccentOrange.copy(alpha = 0.6f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Filled.Warning, contentDescription = null, tint = AccentOrange)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Accessibility Service Disabled",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = TextPrimary
+                            )
+                            Text(
+                                "FlowPilot needs Accessibility to automate taps and typing on your screen.",
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                context.startActivity(intent)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Text("Enable", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -725,10 +820,16 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                 OutlinedButton(
                     onClick = {
                         showStuckDialog = false
-                        val cancelIntent = Intent(context, FlowReplayService::class.java).apply {
-                            action = FlowReplayService.ACTION_CANCEL
+                        FlowReplayService.instance?.cancelReplay() ?: run {
+                            val cancelIntent = Intent(context, FlowReplayService::class.java).apply {
+                                action = FlowReplayService.ACTION_CANCEL
+                            }
+                            try {
+                                context.startService(cancelIntent)
+                            } catch (e: Exception) {
+                                Log.e("FlowPilot", "Failed to cancel service", e)
+                            }
                         }
-                        context.startService(cancelIntent)
                         statusMessage = "Flow cancelled after being stuck."
                     }
                 ) {
@@ -774,12 +875,25 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                     replayTotalSteps = currentMatch.flowGraph.steps.size
                                     replayCurrentStep = 0
 
-                                    val replayIntent = Intent(context, FlowReplayService::class.java).apply {
-                                        action = FlowReplayService.ACTION_REPLAY
-                                        putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(currentMatch.flowGraph))
-                                        putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(currentMatch.parameters ?: emptyMap<String, String>()))
+                                    speak("Executing ${currentMatch.flowName ?: "flow"}")
+                                    val replayService = FlowReplayService.instance
+                                    val flowParams = currentMatch.parameters ?: emptyMap()
+                                    if (replayService != null) {
+                                        replayService.startReplayDirect(currentMatch.flowGraph, flowParams)
+                                    } else {
+                                        try {
+                                            val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                                                action = FlowReplayService.ACTION_REPLAY
+                                                putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(currentMatch.flowGraph))
+                                                putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(flowParams))
+                                            }
+                                            context.startService(replayIntent)
+                                        } catch (e: Exception) {
+                                            statusMessage = "Please enable FlowPilot Accessibility Service in Android Settings"
+                                            speak("Please enable FlowPilot in Accessibility settings first.")
+                                            voiceState = VoiceState.IDLE
+                                        }
                                     }
-                                    context.startService(replayIntent)
                                 }
                             },
                             modifier = Modifier
@@ -1337,15 +1451,21 @@ fun FlowListScreen(onBack: () -> Unit) {
                                             scope.launch {
                                                 try {
                                                     val fullFlow = ApiClient.api.getFlow(flowId)
-                                                    val replayIntent = Intent(context, FlowReplayService::class.java).apply {
-                                                        action = FlowReplayService.ACTION_REPLAY
-                                                        putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(fullFlow))
-                                                        putExtra(FlowReplayService.EXTRA_PARAMS_JSON, "{}")
+                                                    val replayService = FlowReplayService.instance
+                                                    if (replayService != null) {
+                                                        replayService.startReplayDirect(fullFlow, emptyMap())
+                                                        Toast.makeText(context, "Replaying '${fullFlow.flowName}'...", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                                                            action = FlowReplayService.ACTION_REPLAY
+                                                            putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(fullFlow))
+                                                            putExtra(FlowReplayService.EXTRA_PARAMS_JSON, "{}")
+                                                        }
+                                                        context.startService(replayIntent)
+                                                        Toast.makeText(context, "Replaying '${fullFlow.flowName}'...", Toast.LENGTH_SHORT).show()
                                                     }
-                                                    context.startService(replayIntent)
-                                                    Toast.makeText(context, "Replaying '${fullFlow.flowName}'...", Toast.LENGTH_SHORT).show()
                                                 } catch (e: Exception) {
-                                                    Toast.makeText(context, "Could not replay: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, "Could not replay: ${e.message}. Please enable Accessibility Service!", Toast.LENGTH_LONG).show()
                                                 }
                                             }
                                         },

@@ -3,6 +3,9 @@ package com.flowpilot.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.Rect
@@ -57,6 +60,12 @@ class FlowReplayService : AccessibilityService() {
 
         private const val NOTIFICATION_ID = 2001
 
+        var instance: FlowReplayService? = null
+            private set
+
+        val isRunning: Boolean
+            get() = instance != null
+
         var isReplaying = false
             private set
 
@@ -75,6 +84,19 @@ class FlowReplayService : AccessibilityService() {
 
     private var replayJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+        Log.i(TAG, "✅ FlowReplayService connected to Android Accessibility Manager")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (instance == this) {
+            instance = null
+        }
+    }
 
     override fun onInterrupt() {
         Log.w(TAG, "⚠️ FlowReplayService interrupted")
@@ -98,6 +120,21 @@ class FlowReplayService : AccessibilityService() {
         return START_STICKY
     }
 
+    fun startReplayDirect(flow: FlowGraph, params: Map<String, String>) {
+        isReplaying = true
+        lastRunFlowName = flow.flowName
+        lastRunSuccess = null
+        lastRunHaltedStep = 0
+        lastRunReason = "Replay in progress"
+
+        Log.i(TAG, "▶️ Replaying '${flow.flowName}' with params: $params")
+
+        replayJob?.cancel()
+        replayJob = scope.launch {
+            executeFlow(flow, params)
+        }
+    }
+
     private fun startReplay(flowJson: String, paramsJson: String) {
         val flow = try {
             ApiClient.gson.fromJson(flowJson, FlowGraph::class.java)
@@ -112,17 +149,7 @@ class FlowReplayService : AccessibilityService() {
             Json { ignoreUnknownKeys = true }.decodeFromString(paramsJson)
         }
 
-        isReplaying = true
-        lastRunFlowName = flow.flowName
-        lastRunSuccess = null
-        lastRunHaltedStep = 0
-        lastRunReason = "Replay in progress"
-
-        Log.i(TAG, "▶️ Replaying '${flow.flowName}' with params: $params")
-
-        replayJob = scope.launch {
-            executeFlow(flow, params)
-        }
+        startReplayDirect(flow, params)
     }
 
     private fun cancelReplay() {
@@ -222,8 +249,8 @@ class FlowReplayService : AccessibilityService() {
         params: Map<String, String>
     ): Boolean {
         // T11: Credential & Security Boundary Gate
-        // Triggered by either compile-time flag OR dynamic on-screen keyword inspection
-        val isSensitiveScreen = step.isAuthPause || checkDynamicSecurityBoundary()
+        // Triggered by either compile-time flag OR dynamic on-screen keyword inspection (not on open_app)
+        val isSensitiveScreen = step.isAuthPause || (step.actionType != "open_app" && checkDynamicSecurityBoundary())
         if (isSensitiveScreen) {
             val desc = if (step.isAuthPause) step.description else "Sensitive payment or authentication screen detected"
             Log.i(TAG, "🔒 [T11 Credential Boundary] AUTH PAUSE triggered on step ${step.stepIndex}: $desc")
@@ -269,8 +296,15 @@ class FlowReplayService : AccessibilityService() {
                     delay(3000) // Wait for app to load
                     true
                 } else {
-                    Log.e(TAG, "  ❌ Cannot launch package ${flow.targetAppPackage}")
-                    false
+                    Log.w(TAG, "  ⚠️ Package ${flow.targetAppPackage} not installed. Checking if already on active screen...")
+                    val currentRoot = rootInActiveWindow
+                    if (currentRoot != null) {
+                        currentRoot.recycle()
+                        true
+                    } else {
+                        Log.e(TAG, "  ❌ Cannot launch package ${flow.targetAppPackage}")
+                        false
+                    }
                 }
             }
             "click" -> performClick(step, params)
@@ -295,15 +329,18 @@ class FlowReplayService : AccessibilityService() {
     private fun checkDynamicSecurityBoundary(): Boolean {
         val root = rootInActiveWindow ?: return false
         val sensitivePatterns = listOf(
-            "password", "enter pin", "upi pin", "cvv", "otp", "card number",
-            "debit card", "credit card", "payment method", "pay now", "proceed to pay",
-            "verify with otp", "one time password"
+            "enter password", "enter pin", "upi pin", "enter upi", "cvv", "enter otp",
+            "verify otp", "one time password"
         )
-        return findNodeRecursive(root) { node ->
+        val found = findNodeRecursive(root) { node ->
             val text = (node.text?.toString() ?: "").lowercase()
             val desc = (node.contentDescription?.toString() ?: "").lowercase()
             sensitivePatterns.any { pattern -> text.contains(pattern) || desc.contains(pattern) }
-        } != null
+        }
+        val isSensitive = found != null
+        found?.recycle()
+        root.recycle()
+        return isSensitive
     }
 
     // ─────────────────────────────────────────────
@@ -333,20 +370,37 @@ class FlowReplayService : AccessibilityService() {
     // Action executors
     // ─────────────────────────────────────────────
 
+    private fun findClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var current: AccessibilityNodeInfo? = node
+        for (depth in 0..4) {
+            val parent = current?.parent ?: break
+            if (parent.isClickable) return parent
+            current = parent
+        }
+        return null
+    }
+
     private suspend fun performClick(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
         val node = findElementWithRetry(resolvedSelector) ?: return false
 
         var clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         if (!clicked) {
-            // Fallback 1: Try clicking parent
-            clicked = node.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+            // Fallback 1: Try clicking parent or clickable ancestor
+            val ancestor = findClickableAncestor(node)
+            if (ancestor != null) {
+                clicked = ancestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                ancestor.recycle()
+            }
         }
         if (!clicked) {
             // Fallback 2: Direct gesture dispatch (for Compose / custom views)
             clicked = dispatchTapGesture(node)
         }
         node.recycle()
+
+        // Wait slightly for click to register in the UI
+        delay(350)
 
         // T5: Dynamic Quantity Slot handling
         val qty = params["quantity"]?.toIntOrNull() ?: 1
@@ -367,6 +421,7 @@ class FlowReplayService : AccessibilityService() {
                         plusNode.recycle()
                         Log.i(TAG, "  ➕ [T5 Quantity] Incremented quantity ($q/$qty)")
                     }
+                    root.recycle()
                 }
             }
         }
@@ -374,6 +429,43 @@ class FlowReplayService : AccessibilityService() {
         return clicked
     }
 
+    private suspend fun performLongPress(step: FlowStep, params: Map<String, String>): Boolean {
+        val resolvedSelector = resolveSelector(step.selector, step, params)
+        val node = findElementWithRetry(resolvedSelector) ?: return false
+
+        var pressed = node.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+        if (!pressed) {
+            // Fallback 1: Try long-clicking parent
+            val ancestor = findClickableAncestor(node)
+            if (ancestor != null) {
+                pressed = ancestor.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+                ancestor.recycle()
+            }
+        }
+        if (!pressed) {
+            // Fallback 2: Dispatch a 500ms hold gesture (for Compose / custom views)
+            pressed = dispatchLongPressGesture(node)
+        }
+        node.recycle()
+        Log.d(TAG, "  👆 Long press: ${step.description} → $pressed")
+        return pressed
+    }
+
+    private fun dispatchLongPressGesture(node: AccessibilityNodeInfo): Boolean {
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        val x = rect.centerX().toFloat()
+        val y = rect.centerY().toFloat()
+        if (x <= 0 || y <= 0) return false
+
+        val path = Path().apply { moveTo(x, y) }
+        // 500ms hold duration distinguishes long-press from tap
+        val stroke = GestureDescription.StrokeDescription(path, 0, 500)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val dispatched = dispatchGesture(gesture, null, null)
+        Log.d(TAG, "  👆 Long press gesture at ($x, $y) for 500ms -> $dispatched")
+        return dispatched
+    }
     private suspend fun performType(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
         val node = findElementWithRetry(resolvedSelector) ?: return false
@@ -385,14 +477,37 @@ class FlowReplayService : AccessibilityService() {
             step.defaultValue ?: ""
         }
 
+        // Tap first to focus input field so keyboard / IME connection is active
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        delay(350)
+
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        val result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        var result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (!result) {
+            // Fallback 1: Try setting text on active input focus
+            val focused = node.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused != null) {
+                result = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                focused.recycle()
+            }
+        }
+        if (!result) {
+            // Fallback 2: Clipboard paste
+            try {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                clipboard?.setPrimaryClip(ClipData.newPlainText("flowpilot_type", text))
+                result = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            } catch (e: Exception) {
+                Log.w(TAG, "Clipboard paste fallback error: ${e.message}")
+            }
+        }
         node.recycle()
 
         Log.d(TAG, "  ⌨️ Typed: '$text' → $result")
+        delay(300)
         return result
     }
 
@@ -402,8 +517,10 @@ class FlowReplayService : AccessibilityService() {
         if (scrollable != null) {
             val result = scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
             scrollable.recycle()
+            root.recycle()
             return result
         }
+        root.recycle()
         return false
     }
 
@@ -428,38 +545,39 @@ class FlowReplayService : AccessibilityService() {
     // Semantic Element Finder (Cascading Fallback + Pop-up Dismissal)
     // ─────────────────────────────────────────────
 
-    private suspend fun findElementWithRetry(selector: Map<String, String>, maxRetries: Int = 3): AccessibilityNodeInfo? {
+    private suspend fun findElementWithRetry(selector: Map<String, String>, maxRetries: Int = 6): AccessibilityNodeInfo? {
         for (attempt in 1..maxRetries) {
             val root = rootInActiveWindow
             if (root == null) {
-                delay(1000)
+                delay(800)
                 continue
             }
             val node = findElement(root, selector)
             if (node != null) return node
 
+            root.recycle()
             Log.d(TAG, "  🔍 Element not found (attempt $attempt/$maxRetries)")
 
             // T7: Check for unexpected promo pop-ups / overlays obstructing the view
-            if (attempt <= 2) {
-                val dismissed = dismissUnexpectedOverlay(root)
-                if (dismissed) {
-                    Log.i(TAG, "  🎉 [T7 Screen Change] Unexpected overlay/pop-up dismissed! Retrying element search...")
-                    delay(1200)
-                    rootInActiveWindow?.let { newRoot ->
-                        val retryNode = findElement(newRoot, selector)
-                        if (retryNode != null) return retryNode
+            if (attempt in 2..3) {
+                rootInActiveWindow?.let { r ->
+                    val dismissed = dismissUnexpectedOverlay(r)
+                    if (dismissed) {
+                        Log.i(TAG, "  🎉 [T7 Screen Change] Unexpected overlay/pop-up dismissed! Retrying element search...")
+                        delay(1000)
                     }
+                    r.recycle()
                 }
             }
 
-            delay(1000)
+            delay(800)
 
-            // On last retry, try scrolling to bring element into view
-            if (attempt == maxRetries - 1) {
+            // On later retries, try scrolling to bring element into view
+            if (attempt == maxRetries - 2 || attempt == maxRetries - 1) {
                 rootInActiveWindow?.let { r ->
                     findScrollableNode(r)?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                    delay(1000)
+                    r.recycle()
+                    delay(800)
                 }
             }
         }
@@ -576,15 +694,30 @@ class FlowReplayService : AccessibilityService() {
 
     private fun matchesRole(node: AccessibilityNodeInfo, role: String?): Boolean {
         if (role == null) return true
-        val cls = node.className?.toString()?.lowercase() ?: return false
-        return cls.contains(role.lowercase())
+        val roleLower = role.lowercase()
+        val cls = node.className?.toString()?.lowercase() ?: ""
+        if (cls.contains(roleLower)) return true
+
+        return when (roleLower) {
+            "button" -> node.isClickable || cls.contains("imageview") || cls.contains("card")
+            "edittext" -> node.isEditable || cls.contains("edit") || cls.contains("textinput")
+            "textview" -> node.text != null || cls.contains("text")
+            else -> true
+        }
     }
 
     private fun matchesText(node: AccessibilityNodeInfo, contains: String?, equals: String?): Boolean {
-        val text = node.text?.toString() ?: return (contains == null && equals == null)
-        if (equals != null && text.equals(equals, ignoreCase = true)) return true
-        if (contains != null && text.contains(contains, ignoreCase = true)) return true
-        return contains == null && equals == null
+        if (contains == null && equals == null) return true
+        val text = node.text?.toString()
+        val hint = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            node.hintText?.toString()
+        } else null
+        val candidates = listOfNotNull(text, hint)
+        if (candidates.isEmpty()) return false
+
+        if (equals != null && candidates.any { it.equals(equals, ignoreCase = true) }) return true
+        if (contains != null && candidates.any { it.contains(contains, ignoreCase = true) }) return true
+        return false
     }
 
     private fun matchesDescription(node: AccessibilityNodeInfo, contains: String?): Boolean {

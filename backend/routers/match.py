@@ -39,6 +39,7 @@ async def _resolve_match(command: str) -> MatchResult:
     # Extract dynamic parameters
     flow_graph = FlowGraph(**best["flow_graph"])
     params = await extract_parameters(command, flow_graph.parameter_schema)
+    params = {str(k): str(v) for k, v in params.items()}
 
     # T13: Ambiguity Resolution
     # If the user speaks a broad/ambiguous command like "Order pizza", or if two flows match closely,

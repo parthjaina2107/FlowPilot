@@ -299,8 +299,8 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
 
             models_to_try = [
                 "gemini-2.0-flash",
-                "gemini-1.5-flash",
                 "gemini-2.0-flash-lite",
+                "gemini-1.5-flash",
             ]
 
             raw_text = None
@@ -338,4 +338,4 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
         except Exception as e:
             print(f"  [WARN] Parameter extraction fallback: {e}")
 
-    return extracted
+    return {k: str(v) for k, v in extracted.items()}
