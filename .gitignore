@@ -45,6 +45,7 @@ Thumbs.db
 
 # Logs
 *.log
+stress_test_logs/
 
 # Evaluation guidelines & forms
 LangAI3.0_AI_Disclosure.docx

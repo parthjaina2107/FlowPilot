@@ -23,6 +23,12 @@ SAMPLE_FLOWS = [
         flow_name="Order Food on Zomato",
         description="Searches for a dish, adds to cart, and navigates to checkout on Zomato",
         trigger_phrases=[
+            "Order a Margherita pizza from Domino's on Zomato",
+            "Get me a margherita from dominos",
+            "I want to order margherita pizza on zomato",
+            "Order a Farmhouse pizza from Domino's on Zomato",
+            "Order two Margherita pizzas from Domino's",
+            "Order a Margherita from Domino's, deliver to work",
             "Order butter chicken on Zomato",
             "Get food from Zomato",
             "Order dinner from Zomato",
@@ -32,18 +38,20 @@ SAMPLE_FLOWS = [
         ],
         target_app_package="com.application.zomato",
         parameter_schema={
-            "dish_name": {"type": "string", "description": "Dish to order", "default": "butter chicken"},
+            "dish_name": {"type": "string", "description": "Dish to order", "default": "Margherita pizza"},
+            "restaurant": {"type": "string", "description": "Restaurant name", "default": "Domino's"},
             "quantity": {"type": "integer", "description": "Quantity", "default": 1},
             "address": {"type": "string", "description": "Delivery address or label (e.g. Home, Work)", "default": "Home"}
         },
         steps=[
             FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.application.zomato"}, description="Launch Zomato", wait_after_ms=2500),
-            FlowStep(step_index=1, action_type="click", selector={"role": "edittext", "text_contains": "Restaurant name or a dish"}, description="Tap search bar", wait_after_ms=800),
-            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="dish_name", default_value="butter chicken", description="Type dish name", wait_after_ms=1500),
-            FlowStep(step_index=3, action_type="click", selector={"role": "button", "text_contains": "Add"}, description="Tap Add button", wait_after_ms=1000),
-            FlowStep(step_index=4, action_type="click", selector={"role": "button", "text_contains": "View Cart"}, description="Proceed to cart", wait_after_ms=1500),
-            FlowStep(step_index=5, action_type="click", selector={"role": "view", "text_contains": "Deliver to Home"}, parameter_slot="address", default_value="Home", description="Select delivery address", wait_after_ms=1200),
-            FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "Place Order"}, description="Place order", wait_after_ms=1000, is_auth_pause=True)
+            FlowStep(step_index=1, action_type="click", selector={"role": "edittext", "text_contains": "Restaurant name or a dish"}, description="Tap search bar", wait_after_ms=1000),
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="dish_name", default_value="Margherita pizza", description="Type dish name", wait_after_ms=1500),
+            FlowStep(step_index=3, action_type="click", selector={"text_contains": "Margherita"}, parameter_slot="dish_name", default_value="Margherita", description="Select dish from search results", wait_after_ms=2000),
+            FlowStep(step_index=4, action_type="click", selector={"role": "button", "text_contains": "Add"}, description="Tap Add button", wait_after_ms=1200),
+            FlowStep(step_index=5, action_type="click", selector={"role": "button", "text_contains": "View Cart"}, description="Proceed to cart", wait_after_ms=1500),
+            FlowStep(step_index=6, action_type="click", selector={"role": "view", "text_contains": "Deliver to Home"}, parameter_slot="address", default_value="Home", description="Select delivery address", wait_after_ms=1200),
+            FlowStep(step_index=7, action_type="click", selector={"role": "button", "text_contains": "Place Order"}, description="Place order", wait_after_ms=1000, is_auth_pause=True)
         ],
         created_at="2026-09-29T10:00:00Z",
         version=1
@@ -65,10 +73,10 @@ SAMPLE_FLOWS = [
             "query": {"type": "string", "description": "Search term or song title", "default": "lofi hip hop"}
         },
         steps=[
-            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.google.android.youtube"}, description="Open YouTube", wait_after_ms=2500),
-            FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search icon", wait_after_ms=1200),
-            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search YouTube"}, parameter_slot="query", default_value="lofi hip hop", description="Type video title", wait_after_ms=2500),
-            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "content_description_contains": "play video"}, description="Tap video to play", wait_after_ms=3000)
+            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.google.android.youtube"}, description="Open YouTube", wait_after_ms=2000),
+            FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search icon", wait_after_ms=800),
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search YouTube"}, parameter_slot="query", default_value="lofi hip hop", description="Type video title", wait_after_ms=1500),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "lofi"}, description="Tap first search result", wait_after_ms=2000)
         ],
         created_at="2026-09-29T10:05:00Z",
         version=1

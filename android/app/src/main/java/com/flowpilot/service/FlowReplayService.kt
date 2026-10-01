@@ -653,7 +653,7 @@ class FlowReplayService : AccessibilityService() {
     }
     private suspend fun performType(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
-        val node = findElementWithRetry(resolvedSelector) ?: return false
+        var targetNode = findElementWithRetry(resolvedSelector) ?: return false
 
         // Determine text to type (injected param or default)
         val text = if (step.parameterSlot != null) {
@@ -662,18 +662,46 @@ class FlowReplayService : AccessibilityService() {
             step.defaultValue ?: ""
         }
 
+        // Handle search containers/triggers: If the found node is not an editable field,
+        // it is likely a trigger view (e.g. Zomato / Amazon home search bar) that opens the Search activity.
+        if (!targetNode.isEditable) {
+            Log.d(TAG, "  🔍 Found search trigger view (not editable). Tapping to open search screen...")
+            val tapOk = targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK) || dispatchTapGesture(targetNode)
+            targetNode.recycle()
+            delay(800)
+
+            // Look for the newly focused or editable input field on the search screen
+            val root = rootInActiveWindow
+            val realInput = if (root != null) {
+                root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findEditableNode(root)
+            } else null
+
+            if (realInput != null) {
+                targetNode = realInput
+            } else {
+                // Retry finding the element with selector on the new screen
+                val retried = findElementWithRetry(resolvedSelector, maxRetries = 3)
+                if (retried != null) {
+                    targetNode = retried
+                } else {
+                    Log.w(TAG, "  ⚠️ Could not find editable input field after tapping search trigger.")
+                    return false
+                }
+            }
+        }
+
         // Tap first to focus input field so keyboard / IME connection is active
-        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         delay(350)
 
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        var result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        var result = targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         if (!result) {
             // Fallback 1: Try setting text on active input focus
-            val focused = node.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            val focused = targetNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             if (focused != null) {
                 result = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
                 focused.recycle()
@@ -684,19 +712,56 @@ class FlowReplayService : AccessibilityService() {
             try {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                 clipboard?.setPrimaryClip(ClipData.newPlainText("flowpilot_type", text))
-                result = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                result = targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
             } catch (e: Exception) {
                 Log.w(TAG, "Clipboard paste fallback error: ${e.message}")
             }
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            try {
+                targetNode.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            } catch (ignored: Exception) {}
         }
-        node.recycle()
+        targetNode.recycle()
 
         Log.d(TAG, "  ⌨️ Typed: '$text' → $result")
-        delay(300)
+        delay(400)
+
+        // If this is a search query step, also trigger soft keyboard Search/Enter key so results load
+        val isSearchStep = step.description.contains("search", ignoreCase = true) ||
+                step.description.contains("dish", ignoreCase = true) ||
+                step.description.contains("item", ignoreCase = true) ||
+                step.description.contains("video", ignoreCase = true) ||
+                step.description.contains("query", ignoreCase = true)
+        if (isSearchStep && result) {
+            delay(500)
+            pressSoftKeyboardSearch()
+            delay(600)
+        }
+
         return result
+    }
+
+    private fun findEditableNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        return findNodeRecursive(root) { node ->
+            node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true
+        }
+    }
+
+    private fun pressSoftKeyboardSearch() {
+        val dm = resources.displayMetrics
+        val x = dm.widthPixels * 0.92f
+        val y = dm.heightPixels * 0.95f
+        Log.d(TAG, "  🔍 Pressing soft keyboard Search/Enter key at ($x, $y)")
+        dispatchTapAt(x, y)
+    }
+
+    private fun dispatchTapAt(x: Float, y: Float): Boolean {
+        if (x <= 0 || y <= 0) return false
+        val path = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 80)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGesture(gesture, null, null)
     }
 
     private suspend fun performScroll(step: FlowStep): Boolean {

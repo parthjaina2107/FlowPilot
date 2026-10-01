@@ -43,7 +43,7 @@ def _get_model():
 
 async def transcribe(audio_bytes: bytes, file_extension: str = "wav") -> str:
     """
-    Transcribe audio bytes to text using Whisper.
+    Transcribe audio bytes to text using Whisper with Gemini 2.0 Flash Audio fallback.
 
     Args:
         audio_bytes: Raw audio data.
@@ -52,18 +52,52 @@ async def transcribe(audio_bytes: bytes, file_extension: str = "wav") -> str:
     Returns:
         Transcribed text string.
     """
-    model = _get_model()
+    # 1. Try Whisper if available
+    if _WHISPER_AVAILABLE:
+        try:
+            model = _get_model()
+            with tempfile.NamedTemporaryFile(
+                suffix=f".{file_extension}", delete=False
+            ) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
 
-    # Write to a temp file (Whisper needs a file path)
-    with tempfile.NamedTemporaryFile(
-        suffix=f".{file_extension}", delete=False
-    ) as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
+            try:
+                result = model.transcribe(tmp_path, language="en")
+                text = (result.get("text") or "").strip()
+                if text:
+                    print(f"  [OK] Whisper transcribed: '{text}'")
+                    return text
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+        except Exception as e:
+            print(f"  [WARN] Whisper transcription failed: {e}. Falling back to Gemini 2.0 Flash Audio.")
 
+    # 2. Resilient Cloud Fallback via Gemini 2.0 Flash Audio (Multimodal STT)
     try:
-        result = model.transcribe(tmp_path, language="en")
-        return result["text"].strip()
-    finally:
-        # Clean up temp file
-        Path(tmp_path).unlink(missing_ok=True)
+        from services.gemini_service import _get_client
+        client = _get_client()
+        if client:
+            mime = "audio/wav"
+            clean_ext = file_extension.lower().lstrip(".")
+            if clean_ext in ["m4a", "mp4", "aac"]:
+                mime = "audio/mp4"
+            elif clean_ext == "mp3":
+                mime = "audio/mp3"
+            elif clean_ext == "ogg":
+                mime = "audio/ogg"
+
+            from google.genai import types
+            part = types.Part.from_bytes(data=audio_bytes, mime_type=mime)
+            prompt = "Transcribe the spoken command in this audio verbatim. Output ONLY the transcribed text string without any commentary, quotes, or markdown."
+            response = await client.aio.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[part, prompt]
+            )
+            text = (response.text or "").strip()
+            print(f"  [OK] Gemini 2.0 Flash Audio transcribed: '{text}'")
+            return text
+    except Exception as e:
+        print(f"  [ERROR] Gemini audio transcription fallback failed: {e}")
+
+    return ""
