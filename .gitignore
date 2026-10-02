@@ -56,7 +56,7 @@ Theme 3 - Evaluation Criteria.pdf
 # Media and scratch recordings
 *.mp4
 *.wav
-*.xml
+/*.xml
 emulator_*.png
 emulator_debug_prompt.md
 voice_test_results.md

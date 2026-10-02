@@ -29,6 +29,10 @@ SAMPLE_FLOWS = [
             "Order a Farmhouse pizza from Domino's on Zomato",
             "Order two Margherita pizzas from Domino's",
             "Order a Margherita from Domino's, deliver to work",
+            "Order two naans from Zomato",
+            "Get me two naans from Zomato",
+            "I want two naans delivered from Zomato",
+            "Order two naans",
             "Order butter chicken on Zomato",
             "Order food on Zomato",
             "Get food from Zomato",
@@ -98,7 +102,13 @@ SAMPLE_FLOWS = [
             "Send WhatsApp to",
             "Send message to Mom on WhatsApp",
             "Send hi to Mom on WhatsApp",
-            "Message Mom on WhatsApp"
+            "Message Mom on WhatsApp",
+            "Send Dad a message saying I'm running late",
+            "Send Dad a message saying",
+            "Send a message saying",
+            "Send message to Dad",
+            "Message Dad on WhatsApp",
+            "Text Dad on WhatsApp"
         ],
         target_app_package="com.whatsapp",
         parameter_schema={

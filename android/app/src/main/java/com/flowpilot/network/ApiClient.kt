@@ -99,3 +99,118 @@ object ApiClient {
             return cachedApi!!
         }
 }
+
+// ─────────────────────────────────────────────
+// Phase 7: Structured Network Diagnostics
+// ─────────────────────────────────────────────
+
+enum class NetworkErrorType {
+    CONNECTION_REFUSED,
+    TIMEOUT,
+    UNKNOWN_HOST,
+    CLEAR_TEXT_BLOCKED,
+    NETWORK_UNAVAILABLE,
+    HTTP_4XX,
+    HTTP_5XX,
+    MALFORMED_RESPONSE,
+    UNKNOWN
+}
+
+data class NetworkDiagnostic(
+    val errorType: NetworkErrorType,
+    val userMessage: String,
+    val technicalDetails: String,
+    val backendUrl: String,
+    val endpoint: String
+)
+
+object NetworkDiagnostics {
+    fun diagnose(e: Throwable, endpoint: String): NetworkDiagnostic {
+        val url = ApiClient.getBaseUrl()
+        val msg = e.message ?: ""
+        val errorType = when {
+            e is java.net.ConnectException || msg.contains("ECONNREFUSED", ignoreCase = true) ->
+                NetworkErrorType.CONNECTION_REFUSED
+            e is java.net.SocketTimeoutException || msg.contains("timeout", ignoreCase = true) ->
+                NetworkErrorType.TIMEOUT
+            e is java.net.UnknownHostException ->
+                NetworkErrorType.UNKNOWN_HOST
+            msg.contains("CLEARTEXT", ignoreCase = true) || msg.contains("cleartext", ignoreCase = true) ->
+                NetworkErrorType.CLEAR_TEXT_BLOCKED
+            e is retrofit2.HttpException && e.code() in 500..599 ->
+                NetworkErrorType.HTTP_5XX
+            e is retrofit2.HttpException && e.code() in 400..499 ->
+                NetworkErrorType.HTTP_4XX
+            else -> NetworkErrorType.UNKNOWN
+        }
+
+        val userMessage = when (errorType) {
+            NetworkErrorType.CONNECTION_REFUSED ->
+                "FlowPilot cannot reach the local AI server.\nMake sure the backend is running on your computer (0.0.0.0:8000)."
+            NetworkErrorType.CLEAR_TEXT_BLOCKED ->
+                "Local HTTP connection is blocked by Android security settings."
+            NetworkErrorType.TIMEOUT ->
+                "The AI server took too long to respond."
+            NetworkErrorType.UNKNOWN_HOST ->
+                "Cannot resolve backend host. Check server IP configuration."
+            NetworkErrorType.HTTP_5XX ->
+                "The AI server returned an error (5xx)."
+            NetworkErrorType.HTTP_4XX ->
+                "Request was rejected by the AI server (4xx)."
+            NetworkErrorType.NETWORK_UNAVAILABLE ->
+                "Device has no internet or local network connection."
+            else ->
+                "AI server communication failed: ${e.localizedMessage ?: "Unknown error"}"
+        }
+
+        android.util.Log.e("FlowPilot", """
+            [NETWORK]
+            backendUrl=$url
+            endpoint=$endpoint
+            exceptionType=${e.javaClass.simpleName}
+            exceptionMessage=${e.message}
+            classifiedError=$errorType
+        """.trimIndent())
+
+        return NetworkDiagnostic(
+            errorType = errorType,
+            userMessage = userMessage,
+            technicalDetails = "${e.javaClass.simpleName}: ${e.message}",
+            backendUrl = url,
+            endpoint = endpoint
+        )
+    }
+}
+
+// ─────────────────────────────────────────────
+// Phase 9: Safe Network Retry Logic
+// ─────────────────────────────────────────────
+
+suspend fun <T> safeNetworkCall(
+    endpoint: String,
+    maxRetries: Int = 2,
+    initialDelayMs: Long = 600,
+    block: suspend () -> T
+): Result<T> {
+    var lastException: Throwable? = null
+    var delayMs = initialDelayMs
+    for (attempt in 0..maxRetries) {
+        try {
+            val result = block()
+            return Result.success(result)
+        } catch (e: Throwable) {
+            lastException = e
+            // Do not retry 4xx client errors
+            if (e is retrofit2.HttpException && e.code() in 400..499) {
+                break
+            }
+            if (attempt < maxRetries) {
+                android.util.Log.w("FlowPilot", "[NETWORK] Attempt ${attempt + 1} failed for $endpoint, retrying in ${delayMs}ms...", e)
+                kotlinx.coroutines.delay(delayMs)
+                delayMs *= 2
+            }
+        }
+    }
+    return Result.failure(lastException ?: Exception("Network request failed after retries"))
+}
+

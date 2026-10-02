@@ -218,6 +218,43 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var showServerConfigDialog by remember { mutableStateOf(false) }
     var serverUrlInput by remember { mutableStateOf(ApiClient.getBaseUrl()) }
 
+    // Phase 8, 35, 36: Backend Health & Diagnostics State
+    var backendConnected by remember { mutableStateOf<Boolean?>(null) }
+    var backendLatencyMs by remember { mutableLongStateOf(-1L) }
+    var backendErrorMessage by remember { mutableStateOf("") }
+
+    fun checkBackendConnection() {
+        scope.launch {
+            backendConnected = null
+            val start = System.currentTimeMillis()
+            try {
+                val res = ApiClient.api.healthCheck()
+                val latency = System.currentTimeMillis() - start
+                if (res["status"] == "ok") {
+                    backendConnected = true
+                    backendLatencyMs = latency
+                    backendErrorMessage = ""
+                    Log.i("FlowPilot", "[NETWORK] Backend healthy (${latency}ms) at ${ApiClient.getBaseUrl()}")
+                } else {
+                    backendConnected = false
+                    backendLatencyMs = -1L
+                    backendErrorMessage = "Unexpected status: ${res["status"]}"
+                }
+            } catch (e: Exception) {
+                val diag = com.flowpilot.network.NetworkDiagnostics.diagnose(e, "/")
+                backendConnected = false
+                backendLatencyMs = -1L
+                backendErrorMessage = diag.userMessage
+                Log.e("FlowPilot", "[NETWORK] Health check failed: ${diag.userMessage}")
+            }
+        }
+    }
+
+    // Phase 36: Startup Network Check
+    LaunchedEffect(Unit) {
+        checkBackendConnection()
+    }
+
     // Text To Speech Engine (Voice Agent Persona)
     var tts by remember { mutableStateOf<TextToSpeech?>(null) }
     DisposableEffect(context) {
@@ -338,9 +375,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             voiceState = VoiceState.MATCHING
             statusMessage = "Understanding command..."
 
-            // Call backend matching endpoint
-            try {
-                val res = ApiClient.api.matchTextCommand(mapOf("command" to text))
+            // Call backend matching endpoint via safeNetworkCall
+            val result = com.flowpilot.network.safeNetworkCall("/api/match/text", maxRetries = 2) {
+                ApiClient.api.matchTextCommand(mapOf("command" to text))
+            }
+
+            result.onSuccess { res ->
+                backendConnected = true
                 matchResult = res
 
                 if (res.matched && res.flowGraph != null) {
@@ -362,7 +403,6 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     statusMessage = "Matched '${res.flowName}' — Confirm to execute"
                     speak("Matched ${res.flowName}. Ready to execute.")
                     FeedbackManager.speak("Matched ${res.flowName}")
-                    // No auto-start countdown — user explicitly taps [Run Flow]
                 } else {
                     voiceState = VoiceState.NO_MATCH
                     val msg = res.suggestion ?: "No matching flow found for '$text'."
@@ -370,11 +410,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     speak(msg)
                     FeedbackManager.speak(msg)
                 }
-            } catch (e: Exception) {
+            }.onFailure { e ->
                 Log.e("FlowPilot", "Match error", e)
+                val diag = com.flowpilot.network.NetworkDiagnostics.diagnose(e, "/api/match/text")
+                backendConnected = false
                 voiceState = VoiceState.ERROR
                 voiceErrorCode = VoiceErrorCode.NETWORK_FAILED
-                statusMessage = "Failed to reach backend: ${e.localizedMessage}"
+                statusMessage = diag.userMessage
                 speak("Could not reach backend server.")
                 FeedbackManager.speak("Could not reach backend server.")
             }
@@ -396,11 +438,17 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         statusMessage = "Transcribing voice command..."
 
         scope.launch {
-            try {
-                Log.i("FlowPilot", "[VOICE] Uploading audio (${audioFile.length()} bytes)")
+            val audioBytes = audioFile.length()
+            Log.i("FlowPilot", "[VOICE_UPLOAD] url=${ApiClient.getBaseUrl()}api/match/audio mimeType=audio/wav bytes=$audioBytes duration=${audioRecorder.recordedDurationMs}ms")
+
+            val result = com.flowpilot.network.safeNetworkCall("/api/match/audio", maxRetries = 2) {
                 val reqBody = audioFile.asRequestBody("audio/wav".toMediaTypeOrNull())
                 val part = MultipartBody.Part.createFormData("audio", audioFile.name, reqBody)
-                val res = ApiClient.api.matchAudioCommand(part)
+                ApiClient.api.matchAudioCommand(part)
+            }
+
+            result.onSuccess { res ->
+                backendConnected = true
                 matchResult = res
                 val heardText = res.transcribedText?.trim() ?: ""
                 finalTranscript = heardText
@@ -434,7 +482,6 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     statusMessage = "Matched '${res.flowName}' — Confirm to execute"
                     speak("Matched ${res.flowName}. Ready to execute.")
                     FeedbackManager.speak("Matched ${res.flowName}")
-                    // No auto-start countdown — user explicitly taps [Run Flow]
                 } else {
                     if (heardText.isBlank()) {
                         voiceState = VoiceState.ERROR
@@ -449,11 +496,13 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         speak(msg)
                     }
                 }
-            } catch (e: Exception) {
+            }.onFailure { e ->
                 Log.e("FlowPilot", "[VOICE] Audio transcription error", e)
+                val diag = com.flowpilot.network.NetworkDiagnostics.diagnose(e, "/api/match/audio")
+                backendConnected = false
                 voiceState = VoiceState.ERROR
                 voiceErrorCode = VoiceErrorCode.NETWORK_FAILED
-                statusMessage = "Backend transcription service is unavailable: ${e.localizedMessage}"
+                statusMessage = diag.userMessage
                 speak("Backend service unavailable.")
             }
         }
@@ -468,10 +517,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         } catch (ignored: Exception) {}
 
         val wav = audioRecorder.stopRecording()
-        if (finalTranscript.isNotBlank()) {
-            executeVoiceCommand(finalTranscript)
-        } else if (wav != null && wav.exists() && wav.length() > 44) {
+        if (wav != null && wav.exists() && wav.length() > 44) {
             executeAudioCommand(wav)
+        } else if (finalTranscript.isNotBlank()) {
+            executeVoiceCommand(finalTranscript)
         } else {
             voiceState = VoiceState.ERROR
             voiceErrorCode = VoiceErrorCode.MIC_NO_AUDIO
@@ -716,6 +765,76 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Phase 8 & 35: Backend Health Indicator
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = CardBg),
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    when (backendConnected) {
+                        true -> AccentGreen.copy(alpha = 0.5f)
+                        false -> Color.Red.copy(alpha = 0.5f)
+                        null -> SurfaceBg
+                    }
+                )
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    when (backendConnected) {
+                                        true -> AccentGreen
+                                        false -> Color.Red
+                                        null -> AccentOrange
+                                    }
+                                )
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = when (backendConnected) {
+                                    true -> "Backend: Connected (${backendLatencyMs} ms)"
+                                    false -> "Backend: Disconnected"
+                                    null -> "Checking AI Backend..."
+                                },
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = when (backendConnected) {
+                                    true -> AccentGreen
+                                    false -> Color(0xFFFF6B6B)
+                                    null -> TextSecondary
+                                }
+                            )
+                            if (backendConnected == false) {
+                                Text(
+                                    "Start backend server (0.0.0.0:8000)",
+                                    fontSize = 11.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                    }
+                    TextButton(
+                        onClick = { checkBackendConnection() },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(14.dp), tint = SamsungLightBlue)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Check", fontSize = 12.sp, color = SamsungLightBlue, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
             // Top: Status Banner
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1147,12 +1266,26 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             color = TextSecondary
                         )
 
-                        // Action Buttons: Cancel / Run Flow (explicit, no countdown)
+                        // Action Buttons: Cancel / Edit / Run Flow (explicit, no countdown)
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
+                            OutlinedButton(
+                                onClick = {
+                                    voiceState = VoiceState.IDLE
+                                    matchResult = null
+                                    statusMessage = "Command cancelled. Tap mic or type below."
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Cancel")
+                            }
+
                             OutlinedButton(
                                 onClick = {
                                     editParametersMap = matchResult?.parameters?.toMutableMap() ?: mutableMapOf()
@@ -1170,7 +1303,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 onClick = {
                                     startReplayForMatch(matchResult!!)
                                 },
-                                modifier = Modifier.weight(1.5f),
+                                modifier = Modifier.weight(1.3f),
                                 colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
@@ -1365,6 +1498,28 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         HorizontalDivider(color = SurfaceBg)
                         Spacer(modifier = Modifier.height(10.dp))
 
+                        // Phase 33: Network Diagnostics
+                        Text("🌐 NETWORK DIAGNOSTICS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SamsungLightBlue)
+                        Text("• Backend URL: ${ApiClient.getBaseUrl()}", fontSize = 11.sp, color = TextSecondary)
+                        Text(
+                            "• Status: " + when (backendConnected) {
+                                true -> "CONNECTED (${backendLatencyMs} ms)"
+                                false -> "DISCONNECTED"
+                                null -> "CHECKING..."
+                            },
+                            fontSize = 11.sp,
+                            color = when (backendConnected) {
+                                true -> AccentGreen
+                                false -> Color(0xFFFF6B6B)
+                                null -> AccentOrange
+                            },
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (backendErrorMessage.isNotBlank()) {
+                            Text("• Error: $backendErrorMessage", fontSize = 10.sp, color = Color(0xFFFF6B6B))
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
                         val metrics = audioRecorder.lastMetrics
                         Text("🎙️ VOICE DIAGNOSTICS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SamsungLightBlue)
                         Text("• State: ${voiceState.name} | Error: ${voiceErrorCode.name}", fontSize = 11.sp, color = TextSecondary)
@@ -1860,6 +2015,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     onClick = {
                         ApiClient.setBaseUrl(serverUrlInput)
                         showServerConfigDialog = false
+                        checkBackendConnection()
                         Toast.makeText(context, "Server URL updated: $serverUrlInput", Toast.LENGTH_SHORT).show()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue)
@@ -2201,8 +2357,8 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                 } else {
                     Button(
                         onClick = {
-                            if (flowName.isBlank()) {
-                                Toast.makeText(context, "Please enter a flow name", Toast.LENGTH_SHORT).show()
+                            if (flowName.isBlank() || triggerPhrase.isBlank()) {
+                                Toast.makeText(context, "Please enter both Flow Name and Trigger Phrase", Toast.LENGTH_SHORT).show()
                                 return@Button
                             }
                             val startIntent = Intent(context, FlowRecorderService::class.java).apply {
