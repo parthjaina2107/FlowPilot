@@ -16,7 +16,12 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
+import com.flowpilot.audio.AudioRecordManager
 import com.flowpilot.util.FeedbackManager
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody.Companion.asRequestBody
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -65,7 +70,6 @@ import com.flowpilot.service.FlowRecorderService
 import com.flowpilot.service.FlowReplayService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.io.File
 import java.util.Locale
 
 // ─────────────────────────────────────────────
@@ -85,12 +89,23 @@ val TextSecondary = Color(0xFF8B949E)
 enum class VoiceState {
     IDLE,
     LISTENING,
-    PROCESSING,
-    MATCHED,
+    PARTIAL_TRANSCRIPT,
+    FINAL_TRANSCRIPT,
+    MATCHING,
+    CONFIRMATION,
     REPLAYING,
     DONE,
     NO_MATCH,
     ERROR
+}
+
+enum class VoiceErrorCode {
+    NONE,
+    MIC_PERMISSION_DENIED,
+    MIC_INITIALIZATION_FAILED,
+    MIC_NO_AUDIO,
+    TRANSCRIPTION_FAILED,
+    NETWORK_FAILED
 }
 
 class MainActivity : ComponentActivity() {
@@ -152,9 +167,14 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     var voiceState by remember { mutableStateOf(VoiceState.IDLE) }
+    var voiceErrorCode by remember { mutableStateOf(VoiceErrorCode.NONE) }
+    var partialTranscript by remember { mutableStateOf("") }
+    var finalTranscript by remember { mutableStateOf("") }
     var recognizedText by remember { mutableStateOf("") }
     var matchResult by remember { mutableStateOf<MatchResult?>(null) }
     var statusMessage by remember { mutableStateOf("Tap mic to speak a command") }
+    var autoRunCountdown by remember { mutableIntStateOf(0) }
+    var isDebugPanelExpanded by remember { mutableStateOf(false) }
 
     // Live Replay Progress State
     var replayFlowName by remember { mutableStateOf("") }
@@ -216,22 +236,63 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         }
     }
 
-    // Speech Recognizer instance
+    // Speech Recognizer & Direct Audio Recorder instances
     var speechRecognizer by remember { mutableStateOf<SpeechRecognizer?>(null) }
     var rmsLevel by remember { mutableFloatStateOf(0f) }
+    val audioRecorder = remember { AudioRecordManager(context) }
+
+    // Check permission on launch
+    LaunchedEffect(Unit) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            Log.i("FlowPilot", "[VOICE] RECORD_AUDIO permission = GRANTED")
+        }
+    }
 
     // Permission launcher for audio recording
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
-        if (!isGranted) {
+        if (isGranted) {
+            Log.i("FlowPilot", "[VOICE] RECORD_AUDIO permission = GRANTED")
+            voiceErrorCode = VoiceErrorCode.NONE
+        } else {
+            voiceErrorCode = VoiceErrorCode.MIC_PERMISSION_DENIED
+            statusMessage = "Microphone permission is required."
             Toast.makeText(context, "Microphone permission required for voice commands", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun startReplayForMatch(match: MatchResult) {
+        val flow = match.flowGraph ?: return
+        voiceState = VoiceState.REPLAYING
+        replayFlowName = match.flowName ?: flow.flowName
+        replayTotalSteps = flow.steps.size
+        replayCurrentStep = 0
+        speak("Executing $replayFlowName")
+        FeedbackManager.speak("Executing $replayFlowName")
+
+        val flowParams = match.parameters ?: emptyMap()
+        val replayService = FlowReplayService.instance
+        if (replayService != null) {
+            replayService.startReplayDirect(flow, flowParams)
+        } else {
+            val replayIntent = Intent(context, FlowReplayService::class.java).apply {
+                action = FlowReplayService.ACTION_REPLAY
+                putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(flow))
+                putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(flowParams))
+            }
+            try {
+                context.startService(replayIntent)
+            } catch (e: Exception) {
+                Log.e("FlowPilot", "Failed to start service", e)
+            }
         }
     }
 
     // Function to process matched voice command
     fun executeVoiceCommand(text: String) {
         recognizedText = text
+        finalTranscript = text
 
         // T14 Reporting: Check if user asks about status of previous run
         val lower = text.lowercase().trim()
@@ -253,8 +314,8 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             return
         }
 
-        voiceState = VoiceState.PROCESSING
-        statusMessage = "Matching '$text' against FlowPilot flows..."
+        voiceState = VoiceState.MATCHING
+        statusMessage = "Understanding '$text'..."
 
         // Call backend matching endpoint
         scope.launch {
@@ -265,7 +326,6 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                 if (res.matched && res.flowGraph != null) {
                     // T13: Ambiguity Resolution — ask or confirm before executing
                     if (res.isAmbiguous) {
-                        voiceState = VoiceState.MATCHED
                         val prompt = res.clarificationPrompt ?: "Clarification needed"
                         statusMessage = prompt
                         ambiguityPrompt = prompt
@@ -277,38 +337,23 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         return@launch
                     }
 
-                    voiceState = VoiceState.MATCHED
+                    voiceState = VoiceState.CONFIRMATION
                     statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
-                    speak("Executing ${res.flowName}")
-                    FeedbackManager.speak("Executing ${res.flowName}")
+                    speak("Matched ${res.flowName}")
+                    FeedbackManager.speak("Matched ${res.flowName}")
 
-                    delay(1000)
-
-                    // Trigger Replay Service
-                    voiceState = VoiceState.REPLAYING
-                    replayFlowName = res.flowName ?: ""
-                    replayTotalSteps = res.flowGraph.steps.size
-                    replayCurrentStep = 0
-
-                    val flowParams = res.parameters ?: emptyMap()
-                    val replayService = FlowReplayService.instance
-                    if (replayService != null) {
-                        replayService.startReplayDirect(res.flowGraph, flowParams)
-                    } else {
-                        val replayIntent = Intent(context, FlowReplayService::class.java).apply {
-                            action = FlowReplayService.ACTION_REPLAY
-                            putExtra(FlowReplayService.EXTRA_FLOW_JSON, ApiClient.gson.toJson(res.flowGraph))
-                            putExtra(FlowReplayService.EXTRA_PARAMS_JSON, ApiClient.gson.toJson(flowParams))
-                        }
-                        try {
-                            context.startService(replayIntent)
-                        } catch (e: Exception) {
-                            Log.e("FlowPilot", "Failed to start service", e)
-                        }
+                    // 3-second auto-start countdown
+                    autoRunCountdown = 3
+                    while (autoRunCountdown > 0 && voiceState == VoiceState.CONFIRMATION) {
+                        delay(1000)
+                        autoRunCountdown--
+                    }
+                    if (voiceState == VoiceState.CONFIRMATION && autoRunCountdown == 0) {
+                        startReplayForMatch(res)
                     }
                 } else {
                     voiceState = VoiceState.NO_MATCH
-                    val msg = res.suggestion ?: "No matching flow found. Record a new flow first!"
+                    val msg = res.suggestion ?: "No matching flow found for '$text'."
                     statusMessage = msg
                     speak(msg)
                     FeedbackManager.speak(msg)
@@ -316,6 +361,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             } catch (e: Exception) {
                 Log.e("FlowPilot", "Match error", e)
                 voiceState = VoiceState.ERROR
+                voiceErrorCode = VoiceErrorCode.NETWORK_FAILED
                 statusMessage = "Failed to reach backend: ${e.localizedMessage}"
                 speak("Could not reach backend server.")
                 FeedbackManager.speak("Could not reach backend server.")
@@ -323,7 +369,109 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         }
     }
 
-    // System speech recognizer dialog launcher (reliable on emulators/devices without speech service)
+    // Function to process recorded audio file via backend STT (Whisper / Google STT / Gemini)
+    fun executeAudioCommand(audioFile: File) {
+        if (!audioFile.exists() || audioFile.length() <= 44) {
+            voiceState = VoiceState.ERROR
+            voiceErrorCode = VoiceErrorCode.MIC_NO_AUDIO
+            statusMessage = "Microphone started, but no audio was detected."
+            speak("No audio detected.")
+            return
+        }
+
+        voiceState = VoiceState.MATCHING
+        statusMessage = "Understanding voice command..."
+
+        scope.launch {
+            try {
+                Log.i("FlowPilot", "[VOICE] Uploading audio (${audioFile.length()} bytes)")
+                val reqBody = audioFile.asRequestBody("audio/wav".toMediaTypeOrNull())
+                val part = MultipartBody.Part.createFormData("audio", audioFile.name, reqBody)
+                val res = ApiClient.api.matchAudioCommand(part)
+                matchResult = res
+                val heardText = res.transcribedText?.trim() ?: ""
+                finalTranscript = heardText
+                recognizedText = heardText
+
+                Log.i("FlowPilot", "[VOICE] HTTP 200, Transcript=\"$heardText\"")
+
+                if (heardText.isNotBlank()) {
+                    Log.i("FlowPilot", "🎙️ STT Transcribed: '$heardText'")
+                }
+
+                if (res.matched && res.flowGraph != null) {
+                    if (res.isAmbiguous) {
+                        val prompt = res.clarificationPrompt ?: "Clarification needed"
+                        statusMessage = prompt
+                        ambiguityPrompt = prompt
+                        ambiguityOptions = res.ambiguityOptions ?: listOf(res.flowName ?: "Confirm")
+                        pendingAmbiguousMatch = res
+                        showAmbiguityDialog = true
+                        speak(prompt)
+                        FeedbackManager.speak(prompt)
+                        return@launch
+                    }
+
+                    voiceState = VoiceState.CONFIRMATION
+                    statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
+                    speak("Matched ${res.flowName}")
+                    FeedbackManager.speak("Matched ${res.flowName}")
+
+                    // 3-second auto-start countdown
+                    autoRunCountdown = 3
+                    while (autoRunCountdown > 0 && voiceState == VoiceState.CONFIRMATION) {
+                        delay(1000)
+                        autoRunCountdown--
+                    }
+                    if (voiceState == VoiceState.CONFIRMATION && autoRunCountdown == 0) {
+                        startReplayForMatch(res)
+                    }
+                } else {
+                    if (heardText.isBlank()) {
+                        voiceState = VoiceState.ERROR
+                        voiceErrorCode = VoiceErrorCode.TRANSCRIPTION_FAILED
+                        val msg = res.suggestion ?: "Audio was captured but transcription failed. Please try again."
+                        statusMessage = msg
+                        speak(msg)
+                    } else {
+                        voiceState = VoiceState.NO_MATCH
+                        val msg = res.suggestion ?: "No matching flow for '$heardText'"
+                        statusMessage = msg
+                        speak(msg)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("FlowPilot", "[VOICE] Audio transcription error", e)
+                voiceState = VoiceState.ERROR
+                voiceErrorCode = VoiceErrorCode.NETWORK_FAILED
+                statusMessage = "Backend transcription service is unavailable: ${e.localizedMessage}"
+                speak("Backend service unavailable.")
+            }
+        }
+    }
+
+    // Stop recording and process audio via backend STT
+    fun finishListeningAndProcess() {
+        if (voiceState != VoiceState.LISTENING && voiceState != VoiceState.PARTIAL_TRANSCRIPT) return
+
+        try {
+            speechRecognizer?.stopListening()
+        } catch (ignored: Exception) {}
+
+        val wav = audioRecorder.stopRecording()
+        if (finalTranscript.isNotBlank()) {
+            executeVoiceCommand(finalTranscript)
+        } else if (wav != null && wav.exists() && wav.length() > 44) {
+            executeAudioCommand(wav)
+        } else {
+            voiceState = VoiceState.ERROR
+            voiceErrorCode = VoiceErrorCode.MIC_NO_AUDIO
+            statusMessage = "Microphone started, but no audio was detected."
+            speak("No audio detected.")
+        }
+    }
+
+    // System speech recognizer dialog launcher
     val speechIntentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -341,104 +489,66 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         }
     }
 
-    // Function to start voice recognition
+    // Function to start voice recognition via high-fidelity AudioRecord and Multi-Engine STT
     fun startListening() {
         if (!FlowReplayService.isRunning) {
             Toast.makeText(context, "⚠️ Please enable FlowPilot in Accessibility Settings first!", Toast.LENGTH_LONG).show()
         }
 
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            voiceErrorCode = VoiceErrorCode.MIC_PERMISSION_DENIED
+            statusMessage = "Microphone permission is required."
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
 
-        val speechIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak a FlowPilot voice command...")
-        }
+        Log.i("FlowPilot", "[VOICE] RECORD_AUDIO permission = GRANTED")
 
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            try {
-                speechIntentLauncher.launch(speechIntent)
-                return
-            } catch (e: Exception) {
-                statusMessage = "Speech recognizer unavailable. Type your command below."
-                return
+        voiceState = VoiceState.LISTENING
+        voiceErrorCode = VoiceErrorCode.NONE
+        partialTranscript = ""
+        finalTranscript = ""
+        recognizedText = ""
+        autoRunCountdown = 0
+        matchResult = null
+        statusMessage = "Listening... Speak now 🎙️"
+        rmsLevel = 0f
+
+        // Start direct audio recording with chunk streaming and multi-factor tracking
+        val started = audioRecorder.startRecording(
+            audioSource = android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            onRmsUpdate = { rms ->
+                rmsLevel = rms
+            },
+            onSilenceDetected = {
+                finishListeningAndProcess()
+            },
+            maxDurationMs = 7000L,
+            onMaxDurationReached = {
+                finishListeningAndProcess()
+            },
+            onChunkAvailable = { chunkWav ->
+                // Background chunk transcription for live partial transcript
+                scope.launch {
+                    try {
+                        val reqBody = chunkWav.asRequestBody("audio/wav".toMediaTypeOrNull())
+                        val part = MultipartBody.Part.createFormData("audio", chunkWav.name, reqBody)
+                        val res = ApiClient.api.matchAudioPartial(part)
+                        val partial = (res["partial_transcript"] as? String)?.trim() ?: ""
+                        if (partial.isNotBlank() && (voiceState == VoiceState.LISTENING || voiceState == VoiceState.PARTIAL_TRANSCRIPT)) {
+                            partialTranscript = partial
+                            voiceState = VoiceState.PARTIAL_TRANSCRIPT
+                        }
+                    } catch (ignored: Exception) {}
+                }
             }
-        }
+        )
 
-        try {
-            speechRecognizer?.destroy()
-            val recognizer = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
-                SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-            } else {
-                SpeechRecognizer.createSpeechRecognizer(context)
-            }
-            speechRecognizer = recognizer
-
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    voiceState = VoiceState.LISTENING
-                    statusMessage = "Listening... Speak now 🎙️"
-                    recognizedText = ""
-                }
-
-                override fun onBeginningOfSpeech() {
-                    statusMessage = "Hearing your voice..."
-                }
-
-                override fun onRmsChanged(rmsdB: Float) {
-                    rmsLevel = rmsdB
-                }
-
-                override fun onBufferReceived(buffer: ByteArray?) {}
-
-                override fun onEndOfSpeech() {
-                    voiceState = VoiceState.PROCESSING
-                    statusMessage = "Processing voice input..."
-                }
-
-                override fun onError(error: Int) {
-                    voiceState = VoiceState.IDLE
-                    statusMessage = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH -> "No speech recognized. Tap mic, tap a quick prompt, or type below."
-                        SpeechRecognizer.ERROR_NETWORK -> "Network error during speech recognition. Tap a quick prompt or type below."
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard. Tap mic or select a prompt below."
-                        else -> "Speech error ($error). Tap a quick prompt or type below."
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        executeVoiceCommand(matches[0])
-                    } else {
-                        voiceState = VoiceState.IDLE
-                        statusMessage = "Didn't catch that. Tap to try again or type below."
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    val partial = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!partial.isNullOrEmpty()) {
-                        recognizedText = partial[0]
-                    }
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-
-            recognizer.startListening(speechIntent)
-        } catch (e: Exception) {
-            Log.e("FlowPilot", "SpeechRecognizer failed: ${e.message}", e)
-            try {
-                speechIntentLauncher.launch(speechIntent)
-            } catch (ex: Exception) {
-                statusMessage = "Speech recognizer unavailable. Type your command below."
-            }
+        if (!started) {
+            voiceState = VoiceState.ERROR
+            voiceErrorCode = VoiceErrorCode.MIC_INITIALIZATION_FAILED
+            statusMessage = "Microphone initialization failed."
+            return
         }
     }
 
@@ -505,6 +615,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             try {
                 context.unregisterReceiver(receiver)
             } catch (ignored: Exception) {}
+            audioRecorder.stopRecording()
             speechRecognizer?.destroy()
         }
     }
@@ -513,7 +624,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     val infiniteTransition = rememberInfiniteTransition(label = "mic_pulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1.0f,
-        targetValue = if (voiceState == VoiceState.LISTENING) 1.25f else 1.0f,
+        targetValue = if (voiceState == VoiceState.LISTENING || voiceState == VoiceState.PARTIAL_TRANSCRIPT) 1.25f else 1.0f,
         animationSpec = infiniteRepeatable(
             animation = tween(600, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
@@ -578,10 +689,9 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     Text(
                         statusMessage,
                         color = when (voiceState) {
-                            VoiceState.LISTENING -> SamsungLightBlue
-                            VoiceState.PROCESSING -> AccentOrange
-                            VoiceState.MATCHED, VoiceState.REPLAYING -> AccentGreen
-                            VoiceState.DONE -> AccentGreen
+                            VoiceState.LISTENING, VoiceState.PARTIAL_TRANSCRIPT -> SamsungLightBlue
+                            VoiceState.MATCHING -> AccentOrange
+                            VoiceState.CONFIRMATION, VoiceState.REPLAYING, VoiceState.DONE -> AccentGreen
                             VoiceState.NO_MATCH, VoiceState.ERROR -> AccentOrange
                             else -> TextSecondary
                         },
@@ -590,7 +700,74 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         textAlign = TextAlign.Center
                     )
 
-                    if (recognizedText.isNotBlank()) {
+                    // Live Audio Level Visualizer (Phase 10)
+                    if (voiceState == VoiceState.LISTENING || voiceState == VoiceState.PARTIAL_TRANSCRIPT) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "MIC INPUT",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SamsungLightBlue
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            val normalizedLevel = ((rmsLevel - 10f) / 35f).coerceIn(0.05f, 1f)
+                            LinearProgressIndicator(
+                                progress = { normalizedLevel },
+                                modifier = Modifier
+                                    .width(130.dp)
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp)),
+                                color = if (normalizedLevel > 0.35f) AccentGreen else SamsungLightBlue,
+                                trackColor = SurfaceBg
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "${rmsLevel.toInt()} dB",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+
+                    // Live Partial Transcript Section
+                    if (voiceState == VoiceState.PARTIAL_TRANSCRIPT && partialTranscript.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SamsungBlue.copy(alpha = 0.25f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SamsungLightBlue.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    "LIVE TRANSCRIPT (PARTIAL)",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = SamsungLightBlue
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "\"$partialTranscript\"",
+                                    color = TextPrimary,
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "Voice Energy: ${rmsLevel.toInt()} dB",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    } else if (recognizedText.isNotBlank()) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             "\"$recognizedText\"",
@@ -599,6 +776,21 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             fontWeight = FontWeight.SemiBold,
                             textAlign = TextAlign.Center
                         )
+                    }
+
+                    // Phase 18: Inline Try Again Button on Error
+                    if (voiceState == VoiceState.ERROR) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { startListening() },
+                            colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Try Again", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
                     }
 
                     // Progress indicator for REPLAY
@@ -625,7 +817,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
 
             // Accessibility Warning Banner
             if (FlowReplayService.instance == null) {
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(4.dp))
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = AccentOrange.copy(alpha = 0.15f)),
@@ -667,59 +859,176 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                 }
             }
 
-            // Center: Big Interactive Mic Button
-            Box(
-                modifier = Modifier
-                    .size(150.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                // Outer pulsing glow
-                if (voiceState == VoiceState.LISTENING) {
-                    Box(
-                        modifier = Modifier
-                            .size(150.dp)
-                            .scale(pulseScale)
-                            .clip(CircleShape)
-                            .background(SamsungLightBlue.copy(alpha = 0.25f))
-                    )
-                }
-
-                // Inner Main Button
-                Box(
-                    modifier = Modifier
-                        .size(110.dp)
-                        .clip(CircleShape)
-                        .background(
-                            Brush.radialGradient(
-                                colors = when (voiceState) {
-                                    VoiceState.LISTENING -> listOf(Color(0xFFEA4335), Color(0xFFB31412))
-                                    VoiceState.PROCESSING -> listOf(AccentOrange, Color(0xFFC05621))
-                                    VoiceState.REPLAYING -> listOf(AccentGreen, Color(0xFF238636))
-                                    else -> listOf(SamsungLightBlue, SamsungBlue)
-                                }
-                            )
-                        )
-                        .clickable {
-                            if (voiceState == VoiceState.LISTENING) {
-                                speechRecognizer?.stopListening()
-                            } else {
-                                startListening()
-                            }
-                        },
-                    contentAlignment = Alignment.Center
+            // Center Area: Matched Flow Confirmation Card OR Mic Button
+            if (voiceState == VoiceState.CONFIRMATION && matchResult != null && matchResult!!.flowGraph != null) {
+                val flow = matchResult!!.flowGraph!!
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = CardBg),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SamsungLightBlue.copy(alpha = 0.7f))
                 ) {
-                    Icon(
-                        imageVector = when (voiceState) {
-                            VoiceState.LISTENING -> Icons.Filled.Mic
-                            VoiceState.PROCESSING -> Icons.Filled.HourglassTop
-                            VoiceState.REPLAYING -> Icons.Filled.PlayArrow
-                            VoiceState.DONE -> Icons.Filled.Check
-                            else -> Icons.Filled.Mic
-                        },
-                        contentDescription = "Voice command",
-                        tint = Color.White,
-                        modifier = Modifier.size(50.dp)
-                    )
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = SamsungLightBlue, modifier = Modifier.size(22.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Flow Matched", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = TextPrimary)
+                            Spacer(modifier = Modifier.weight(1f))
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = AccentGreen.copy(alpha = 0.2f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, AccentGreen)
+                            ) {
+                                Text(
+                                    "${((matchResult!!.confidence ?: 0.9) * 100).toInt()}% confidence",
+                                    color = AccentGreen,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            "Command: \"${finalTranscript.ifBlank { recognizedText }}\"",
+                            fontSize = 13.sp,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            matchResult!!.flowName ?: flow.flowName,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SamsungLightBlue
+                        )
+                        Text(
+                            flow.description,
+                            fontSize = 12.sp,
+                            color = TextSecondary
+                        )
+
+                        if (!matchResult!!.parameters.isNullOrEmpty()) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text("Parameters / Slots:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = TextPrimary)
+                            matchResult!!.parameters!!.forEach { (k, v) ->
+                                Row(modifier = Modifier.padding(vertical = 1.dp)) {
+                                    Text("• $k: ", color = TextSecondary, fontSize = 13.sp)
+                                    Text(v, color = AccentOrange, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("App: ${flow.targetAppPackage}", fontSize = 11.sp, color = TextSecondary)
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    voiceState = VoiceState.IDLE
+                                    autoRunCountdown = 0
+                                    matchResult = null
+                                    statusMessage = "Flow cancelled."
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Cancel")
+                            }
+
+                            Button(
+                                onClick = {
+                                    autoRunCountdown = 0
+                                    startReplayForMatch(matchResult!!)
+                                },
+                                modifier = Modifier.weight(1.5f),
+                                colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    if (autoRunCountdown > 0) "Run Flow (${autoRunCountdown}s)" else "Run Flow",
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Main Interactive Mic Button
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        modifier = Modifier.size(150.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        // Outer pulsing glow
+                        if (voiceState == VoiceState.LISTENING || voiceState == VoiceState.PARTIAL_TRANSCRIPT) {
+                            Box(
+                                modifier = Modifier
+                                    .size(150.dp)
+                                    .scale(pulseScale)
+                                    .clip(CircleShape)
+                                    .background(SamsungLightBlue.copy(alpha = 0.25f))
+                            )
+                        }
+
+                        // Inner Main Button
+                        Box(
+                            modifier = Modifier
+                                .size(110.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    Brush.radialGradient(
+                                        colors = when (voiceState) {
+                                            VoiceState.LISTENING, VoiceState.PARTIAL_TRANSCRIPT -> listOf(Color(0xFFEA4335), Color(0xFFB31412))
+                                            VoiceState.MATCHING -> listOf(AccentOrange, Color(0xFFC05621))
+                                            VoiceState.REPLAYING -> listOf(AccentGreen, Color(0xFF238636))
+                                            else -> listOf(SamsungLightBlue, SamsungBlue)
+                                        }
+                                    )
+                                )
+                                .clickable {
+                                    if (voiceState == VoiceState.LISTENING || voiceState == VoiceState.PARTIAL_TRANSCRIPT) {
+                                        finishListeningAndProcess()
+                                    } else {
+                                        startListening()
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = when (voiceState) {
+                                    VoiceState.LISTENING, VoiceState.PARTIAL_TRANSCRIPT -> Icons.Filled.Mic
+                                    VoiceState.MATCHING -> Icons.Filled.HourglassTop
+                                    VoiceState.REPLAYING -> Icons.Filled.PlayArrow
+                                    VoiceState.DONE -> Icons.Filled.Check
+                                    else -> Icons.Filled.Mic
+                                },
+                                contentDescription = "Voice command",
+                                tint = Color.White,
+                                modifier = Modifier.size(50.dp)
+                            )
+                        }
+                    }
+
+                    if (voiceState == VoiceState.LISTENING || voiceState == VoiceState.PARTIAL_TRANSCRIPT) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { finishListeningAndProcess() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.Red),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Stop Speaking", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
             }
 
@@ -800,6 +1109,64 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         }
                     )
                 )
+            }
+
+            // Phase 19: Collapsible Development Debug Panel
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = CardBg),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBg)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isDebugPanelExpanded = !isDebugPanelExpanded },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.BugReport, contentDescription = null, tint = SamsungLightBlue, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Development Debug Panel", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                        }
+                        Icon(
+                            if (isDebugPanelExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = null,
+                            tint = TextSecondary
+                        )
+                    }
+
+                    if (isDebugPanelExpanded) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        HorizontalDivider(color = SurfaceBg)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        val metrics = audioRecorder.lastMetrics
+                        Text("🎙️ VOICE DIAGNOSTICS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SamsungLightBlue)
+                        Text("• State: ${voiceState.name} | Error: ${voiceErrorCode.name}", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Source: ${metrics?.audioSource ?: "VOICE_RECOGNITION"} | 16kHz Mono", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Samples: ${metrics?.sampleCount ?: 0} (Non-zero: ${metrics?.nonZeroSamples ?: 0})", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Min/Max: [${metrics?.minSample ?: 0}, ${metrics?.maxSample ?: 0}] | Peak: ${metrics?.peakAmplitude ?: 0}", fontSize = 11.sp, color = TextSecondary)
+                        Text("• RMS: ${String.format(java.util.Locale.US, "%.1f", metrics?.rmsEnergy ?: 0.0)} | Live Meter: ${rmsLevel.toInt()} dB", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Duration: ${audioRecorder.recordedDurationMs} ms | WAV: ${metrics?.wavFileSize ?: audioRecorder.recordedBytesCount} B", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Partial: \"${partialTranscript.ifBlank { "none" }}\"", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Final: \"${finalTranscript.ifBlank { "none" }}\"", fontSize = 11.sp, color = TextSecondary)
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("🎯 MATCH DIAGNOSTICS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AccentGreen)
+                        Text("• Flow ID: ${matchResult?.flowId ?: "none"}", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Confidence: ${matchResult?.confidence?.let { "${(it * 100).toInt()}%" } ?: "N/A"}", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Slots: ${matchResult?.parameters ?: "none"}", fontSize = 11.sp, color = TextSecondary)
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("⚡ REPLAY DIAGNOSTICS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AccentOrange)
+                        Text("• Service Connected: ${FlowReplayService.instance != null}", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Step: $replayCurrentStep of $replayTotalSteps ($replayStepDesc)", fontSize = 11.sp, color = TextSecondary)
+                        Text("• Last Run: ${FlowReplayService.getLastRunReport()}", fontSize = 11.sp, color = TextSecondary)
+                    }
+                }
             }
 
             // Bottom Actions: Record New Flow & My Flows
@@ -1263,6 +1630,13 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                             val jsonText = traceFile.readText()
                             val trace = ApiClient.gson.fromJson(jsonText, RecordingTrace::class.java)
 
+                            if (trace.actions.size < 2) {
+                                recordState = RecordState.ERROR
+                                errorMessage = "⚠️ Recording must contain at least 2 interactions to form a valid flow (captured ${trace.actions.size} action)."
+                                FeedbackManager.speak("Recording must contain at least two interactions.")
+                                return@launch
+                            }
+
                             val resultFlow = ApiClient.api.compileTrace(trace)
                             compiledFlow = resultFlow
                             recordState = RecordState.COMPILED
@@ -1270,7 +1644,7 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                         } catch (e: Exception) {
                             Log.e("FlowPilot", "Compilation error", e)
                             recordState = RecordState.ERROR
-                            errorMessage = "Compilation failed: ${e.localizedMessage}"
+                            errorMessage = "Compilation failed: Backend server offline or error (${e.localizedMessage})"
                         }
                     }
                 }

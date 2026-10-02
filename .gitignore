@@ -45,6 +45,7 @@ Thumbs.db
 
 # Logs
 *.log
+stress_test_logs/
 
 # Evaluation guidelines & forms
 LangAI3.0_AI_Disclosure.docx
@@ -54,6 +55,11 @@ Theme 3 - Evaluation Criteria.pdf
 
 # Media and scratch recordings
 *.mp4
+*.wav
+*.xml
+emulator_*.png
+emulator_debug_prompt.md
+voice_test_results.md
 record_workflow.py
 record_showcase.py
 SRMUniversity_Cheesecake_Submission_v1_visual_FIXED.pptx

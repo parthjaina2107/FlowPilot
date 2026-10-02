@@ -499,6 +499,14 @@ class FlowReplayService : AccessibilityService() {
                     } else {
                         paramVal
                     }
+                } else if (key == "content_description_contains" && (paramSlot == "query" || paramSlot == "dish_name" || paramSlot == "item_name" || paramSlot == "track_or_artist")) {
+                    if (defaultVal.isNotBlank() && value.contains(defaultVal, ignoreCase = true)) {
+                        value.replace(defaultVal, paramVal, ignoreCase = true)
+                    } else if (paramVal.isNotBlank()) {
+                        paramVal
+                    } else {
+                        value
+                    }
                 } else {
                     value
                 }
@@ -527,6 +535,29 @@ class FlowReplayService : AccessibilityService() {
     // Action executors
     // ─────────────────────────────────────────────
 
+    private fun captureScreenFingerprint(): String {
+        val root = rootInActiveWindow ?: return ""
+        val sb = StringBuilder()
+        sb.append(root.packageName).append("|")
+        var count = 0
+        fun traverse(n: AccessibilityNodeInfo) {
+            if (count > 25) return
+            val t = n.text?.toString() ?: ""
+            val d = n.contentDescription?.toString() ?: ""
+            val id = n.viewIdResourceName ?: ""
+            if (t.isNotBlank() || d.isNotBlank() || id.isNotBlank()) {
+                sb.append(t).append(";").append(d).append(";").append(id).append("|")
+                count++
+            }
+            for (i in 0 until n.childCount) {
+                n.getChild(i)?.let { traverse(it); it.recycle() }
+            }
+        }
+        traverse(root)
+        root.recycle()
+        return sb.toString()
+    }
+
     private fun findClickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         var current: AccessibilityNodeInfo? = node
         for (depth in 0..4) {
@@ -550,6 +581,8 @@ class FlowReplayService : AccessibilityService() {
                 className.contains("compose") ||
                 (node.isClickable && className.contains("view"))
 
+        val stateBefore = captureScreenFingerprint()
+
         var clicked = false
         if (isContainerOrCustom) {
             clicked = dispatchTapGesture(node)
@@ -569,10 +602,23 @@ class FlowReplayService : AccessibilityService() {
             // Fallback 2: Direct gesture dispatch (for Compose / custom views)
             clicked = dispatchTapGesture(node)
         }
-        node.recycle()
 
         // Wait slightly for click to register in the UI
-        delay(350)
+        delay(400)
+
+        // Screen change verification
+        val stateAfter = captureScreenFingerprint()
+        val screenChanged = stateBefore.isNotEmpty() && stateBefore != stateAfter
+        Log.d(TAG, "👆 Click on '${step.description}' registered=$clicked, screenChanged=$screenChanged")
+
+        // If screen didn't change despite click reporting true, try gesture tap fallback
+        if (clicked && !screenChanged) {
+            Log.d(TAG, "  ⚠️ Screen state unchanged after click; trying gesture tap fallback...")
+            dispatchTapGesture(node)
+            delay(350)
+        }
+
+        node.recycle()
 
         // T5: Dynamic Quantity Slot handling (only execute once per flow on item addition)
         val qty = params["quantity"]?.toIntOrNull() ?: 1
@@ -653,7 +699,7 @@ class FlowReplayService : AccessibilityService() {
     }
     private suspend fun performType(step: FlowStep, params: Map<String, String>): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
-        val node = findElementWithRetry(resolvedSelector) ?: return false
+        val targetNode = findElementWithRetry(resolvedSelector) ?: return false
 
         // Determine text to type (injected param or default)
         val text = if (step.parameterSlot != null) {
@@ -662,41 +708,146 @@ class FlowReplayService : AccessibilityService() {
             step.defaultValue ?: ""
         }
 
-        // Tap first to focus input field so keyboard / IME connection is active
-        node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        delay(350)
+        // Locate actual editable node (target might be a container or wrapper)
+        val editableNode = if (targetNode.isEditable) {
+            targetNode
+        } else {
+            findNodeRecursive(targetNode) { it.isEditable } ?: targetNode
+        }
+
+        Log.d(TAG, "⌨️ Typing target: ${editableNode.className}, isEditable=${editableNode.isEditable}")
+
+        // 1. Focus input field & activate keyboard
+        editableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        editableNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        dispatchTapGesture(editableNode)
+        delay(500) // Wait for keyboard animation
+
+        // Helper to check if text actually appears in the target node or the active window
+        fun isTextActuallyPresent(): Boolean {
+            val currentText = editableNode.text?.toString() ?: ""
+            if (currentText.contains(text, ignoreCase = true)) return true
+            val root = rootInActiveWindow ?: return false
+            try {
+                val found = findNodeRecursive(root) { n ->
+                    (n.text?.toString() ?: "").contains(text, ignoreCase = true)
+                }
+                val present = found != null
+                found?.recycle()
+                return present
+            } finally {
+                root.recycle()
+            }
+        }
+
+        // Try clearing existing text first
+        try {
+            val clearArgs = Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, Int.MAX_VALUE)
+            }
+            editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, clearArgs)
+        } catch (e: Exception) {
+            Log.w(TAG, "Selection clear warning: ${e.message}")
+        }
 
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
-        var result = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-        if (!result) {
-            // Fallback 1: Try setting text on active input focus
-            val focused = node.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+
+        // Attempt 1: ACTION_SET_TEXT on editableNode
+        editableNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        delay(350)
+        var verified = isTextActuallyPresent()
+
+        // Attempt 2: Focused node ACTION_SET_TEXT (if Attempt 1 didn't actually set text)
+        if (!verified) {
+            Log.d(TAG, "Attempt 1 unverified; trying focused node ACTION_SET_TEXT")
+            val focused = editableNode.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             if (focused != null) {
-                result = focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
                 focused.recycle()
+                delay(350)
+                verified = isTextActuallyPresent()
             }
         }
-        if (!result) {
-            // Fallback 2: Clipboard paste
+
+        // Attempt 3: Clipboard paste
+        if (!verified) {
+            Log.d(TAG, "Attempt 2 unverified; trying clipboard paste")
             try {
                 val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
                 clipboard?.setPrimaryClip(ClipData.newPlainText("flowpilot_type", text))
-                result = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                editableNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                delay(350)
+                verified = isTextActuallyPresent()
             } catch (e: Exception) {
                 Log.w(TAG, "Clipboard paste fallback error: ${e.message}")
             }
         }
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-            node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
-        }
-        node.recycle()
 
-        Log.d(TAG, "  ⌨️ Typed: '$text' → $result")
-        delay(300)
-        return result
+        // Attempt 4: Shell input text via Runtime.exec (most reliable fallback on emulators)
+        var shellInputExecuted = false
+        if (!verified) {
+            Log.d(TAG, "Attempt 3 unverified; trying shell input text command")
+            try {
+                val encodedText = text.replace(" ", "%s").replace("&", "\\&").replace("|", "\\|")
+                val proc = Runtime.getRuntime().exec(arrayOf("input", "text", encodedText))
+                proc.waitFor()
+                shellInputExecuted = (proc.exitValue() == 0)
+                delay(400)
+                verified = isTextActuallyPresent()
+            } catch (e: Exception) {
+                Log.w(TAG, "Runtime input text fallback error: ${e.message}")
+            }
+        }
+
+        Log.i(TAG, "⌨️ Text verification for '$text': $verified (shellFallback=$shellInputExecuted)")
+
+        // Submission & IME Enter Handling
+        // A: ACTION_IME_ENTER
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            editableNode.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+        }
+
+        // B: Runtime keyevent 66 (Enter)
+        try {
+            Runtime.getRuntime().exec(arrayOf("input", "keyevent", "66"))
+        } catch (e: Exception) {
+            Log.d(TAG, "Runtime keyevent 66 exception (expected if unprivileged): ${e.message}")
+        }
+
+        // C: Click search suggestion if present (e.g. YouTube / search dropdown)
+        delay(400)
+        rootInActiveWindow?.let { root ->
+            val suggestion = findNodeRecursive(root) { n ->
+                val t = (n.text?.toString() ?: "").trim()
+                val id = (n.viewIdResourceName ?: "").lowercase()
+                val cls = n.className?.toString()?.lowercase() ?: ""
+                val rect = Rect()
+                n.getBoundsInScreen(rect)
+                val inDropdownZone = rect.top in 180..650
+                inDropdownZone && (t.equals(text, ignoreCase = true) || id.contains("suggest") || id.contains("linear") || cls.contains("layout")) && (n.isClickable || (n.parent?.isClickable == true))
+            }
+            if (suggestion != null) {
+                Log.d(TAG, "🎯 Clicking search suggestion to execute search: text='${suggestion.text}'")
+                val ok = suggestion.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+                        (suggestion.parent?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) ||
+                        dispatchTapGesture(suggestion)
+                Log.d(TAG, "  🎯 Suggestion click result: $ok")
+                suggestion.recycle()
+            }
+            root.recycle()
+        }
+
+        if (editableNode != targetNode) {
+            editableNode.recycle()
+        }
+        targetNode.recycle()
+
+        delay(400)
+        return verified || shellInputExecuted
     }
 
     private suspend fun performScroll(step: FlowStep): Boolean {
@@ -901,6 +1052,53 @@ class FlowReplayService : AccessibilityService() {
                 matchesDescription(node, descContains)
             }?.let {
                 Log.d(TAG, "  ⚡ Level 4 fallback match: desc=$descContains")
+                return it
+            }
+        }
+
+        // Level 5: Smart Feed / Result Card Fallback for Media & Shopping Apps
+        val queryParam = descContains ?: textContains
+        if (queryParam != null && queryParam.length >= 3) {
+            val words = queryParam.split(" ").filter { it.length >= 3 }
+            if (words.isNotEmpty()) {
+                findNodeRecursive(root) { node ->
+                    val desc = node.contentDescription?.toString() ?: ""
+                    val text = node.text?.toString() ?: ""
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    val inContentArea = rect.top >= 180 && rect.height() >= 100
+                    val matchesAnyWord = words.any { desc.contains(it, ignoreCase = true) || text.contains(it, ignoreCase = true) }
+                    inContentArea && (node.isClickable || node.childCount > 0) && matchesAnyWord
+                }?.let {
+                    Log.d(TAG, "  ⚡ Level 5 Smart Result Card match: desc='${it.contentDescription}'")
+                    return it
+                }
+            }
+        }
+
+        // Level 6: Top Card Fallback in Content Area
+        if (role?.contains("group", ignoreCase = true) == true || role?.contains("layout", ignoreCase = true) == true || role?.contains("card", ignoreCase = true) == true) {
+            findNodeRecursive(root) { node ->
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                val inContentArea = rect.top in 180..1200 && rect.height() >= 150 && rect.width() >= 300
+                val cls = node.className?.toString()?.lowercase() ?: ""
+                val isCard = cls.contains("viewgroup") || cls.contains("frame") || cls.contains("card") || cls.contains("layout")
+                inContentArea && isCard && (node.isClickable || (node.childCount > 0 && node.isClickable))
+            }?.let {
+                Log.d(TAG, "  ⚡ Level 6 Top Card Fallback match: bounds=[${it.getBoundsInScreen(Rect())}]")
+                return it
+            }
+        }
+
+        // Level 7: Any visible editable or focused input node when role is edittext
+        if (role?.contains("edit", ignoreCase = true) == true) {
+            findNodeRecursive(root) { node ->
+                val cls = node.className?.toString()?.lowercase() ?: ""
+                (node.isEditable || node.isFocused || cls.contains("edit") || cls.contains("autocompletetextview")) &&
+                        node.isVisibleToUser
+            }?.let {
+                Log.d(TAG, "  ⚡ Level 7 Editable Field Fallback match: class=${it.className}")
                 return it
             }
         }

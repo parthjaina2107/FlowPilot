@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from models.schemas import FlowGraph, MatchRequest, MatchResult
 from services.gemini_service import extract_parameters
 from services.sbert_service import get_best_match_with_candidates
-from services.whisper_service import transcribe
+from services.whisper_service import transcribe, transcribe_diagnostic
 
 router = APIRouter(prefix="/api/match", tags=["Match"])
 
@@ -30,6 +30,7 @@ async def _resolve_match(command: str) -> MatchResult:
     # Find candidate flows via S-BERT + ChromaDB
     best, candidates = await get_best_match_with_candidates(command)
     if best is None:
+        print(f"  [MATCH] input=\"{command}\" -> NO_MATCH")
         return MatchResult(
             matched=False,
             transcribed_text=command,
@@ -103,6 +104,12 @@ async def _resolve_match(command: str) -> MatchResult:
             ambiguity_options = [f"Use default ({params.get(unmentioned_params[0])})", "Clarify parameter", "Record new flow"]
             clarification_prompt = f"Matched '{best['flow_name']}'. What {first_missing} would you like?"
 
+    # Phase 8 Logging requirement
+    print(
+        f"  [MATCH] input=\"{command}\" flow=\"{best['flow_id']}\" "
+        f"name=\"{flow_graph.flow_name}\" confidence={best['confidence']:.2f} slots={params}"
+    )
+
     return MatchResult(
         matched=True,
         flow_id=best["flow_id"],
@@ -137,7 +144,7 @@ async def match_text_command(req: MatchRequest) -> MatchResult:
 async def match_audio_command(audio: UploadFile = File(...)) -> MatchResult:
     """
     Match an audio voice command to a stored flow.
-    1. Transcribe audio via Whisper
+    1. Transcribe audio via multi-engine STT (Google / Whisper / Gemini) with full diagnostics
     2. Find the best matching flow via Sentence-BERT + ChromaDB
     3. Detect ambiguity or reporting queries (T13, T14)
     4. Extract parameters from the command via Gemini
@@ -151,13 +158,40 @@ async def match_audio_command(audio: UploadFile = File(...)) -> MatchResult:
     if audio.filename and "." in audio.filename:
         ext = audio.filename.rsplit(".", 1)[-1]
 
-    command = await transcribe(audio_bytes, file_extension=ext)
+    diag = await transcribe_diagnostic(audio_bytes, file_extension=ext)
+    command = diag["text"]
+
     if not command:
+        print(f"  [VOICE_ERROR] code={diag.get('error_code')}: {diag.get('user_message')}")
         return MatchResult(
             matched=False,
             transcribed_text="",
-            suggestion="Could not transcribe audio. Please try again.",
+            suggestion=diag.get("user_message") or "Could not transcribe audio. Please try again.",
         )
 
-    print(f"  [AUDIO] Transcribed: '{command}'")
+    print(f"  [VOICE_SUCCESS] engine={diag.get('engine')} transcript=\"{command}\"")
     return await _resolve_match(command)
+
+
+@router.post("/audio/partial")
+async def match_audio_partial(audio: UploadFile = File(...)) -> dict[str, Any]:
+    """
+    Fast partial audio transcription endpoint for live speech streaming.
+    Receives an audio chunk and returns partial transcript if speech detected.
+    """
+    audio_bytes = await audio.read()
+    if not audio_bytes or len(audio_bytes) < 44:
+        return {"partial_transcript": "", "is_final": False, "duration_s": 0.0, "rms": 0.0}
+
+    ext = "wav"
+    if audio.filename and "." in audio.filename:
+        ext = audio.filename.rsplit(".", 1)[-1]
+
+    diag = await transcribe_diagnostic(audio_bytes, file_extension=ext)
+    return {
+        "partial_transcript": diag["text"],
+        "is_final": False,
+        "duration_s": diag["duration_s"],
+        "rms": diag["rms_energy"],
+        "engine": diag["engine"]
+    }
