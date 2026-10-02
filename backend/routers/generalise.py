@@ -30,23 +30,45 @@ async def compile_trace(trace: RecordingTrace) -> FlowGraph:
     4. Save to SQLite + index triggers in ChromaDB
     5. Return the FlowGraph
     """
+    # --- Phase 9: Logging requirement ---
+    first_action_str = f"{trace.actions[0].action_type} on '{trace.actions[0].element_text or trace.actions[0].content_description or trace.actions[0].element_class}'" if trace.actions else "None"
+    last_action_str = f"{trace.actions[-1].action_type} on '{trace.actions[-1].element_text or trace.actions[-1].content_description or trace.actions[-1].element_class}'" if trace.actions else "None"
+    print(
+        f"  [COMPILE_TRACE]\n"
+        f"    flow_name: '{trace.flow_name}'\n"
+        f"    trigger: '{trace.trigger_phrase}'\n"
+        f"    target_package: '{trace.target_app_package}'\n"
+        f"    actions_count: {len(trace.actions)}\n"
+        f"    first_action: {first_action_str}\n"
+        f"    last_action: {last_action_str}"
+    )
+
     # --- Validation ---
     if len(trace.actions) < 2:
+        print(f"  [COMPILE_400] Validation failed: actions.count={len(trace.actions)} < 2")
         raise HTTPException(
             status_code=400,
-            detail="Recording trace must have at least 2 actions.",
+            detail="Recording trace must have at least 2 actions. Please perform at least two actions and try again.",
         )
 
-    # --- Compile via Gemini ---
+    # --- Compile via Gemini (with heuristic fallback) ---
     try:
-        print(f"  [COMPILE] Compiling flow '{trace.flow_name}' ({len(trace.actions)} actions)...")
         raw_flow = await compile_flow(trace)
-        print("  [OK] Gemini compiled successfully")
+        print("  [OK] Flow compiled successfully")
     except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Gemini compilation failed: {str(e)}",
-        )
+        import traceback
+        traceback.print_exc()
+        print(f"  [COMPILE_ERROR] Compilation failed: {e}. Trying heuristic fallback...")
+        try:
+            from services.gemini_service import compile_flow_heuristic
+            raw_flow = compile_flow_heuristic(trace)
+            print("  [OK] Heuristic fallback compilation succeeded")
+        except Exception as e2:
+            print(f"  [COMPILE_502] Both Gemini and heuristic compilation failed: {e2}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Flow compilation service is unavailable: {str(e)}",
+            )
 
     # --- Build the FlowGraph ---
     flow_id = str(uuid.uuid4())

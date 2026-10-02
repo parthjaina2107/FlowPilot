@@ -308,15 +308,38 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
                         extracted[name] = int(match.group(1))
                     except ValueError:
                         pass
-        elif name == "address":
-            # Match patterns like: "to Home", "to Work", "deliver to Office", "at Home", "to Flat 402"
-            addr_match = re.search(
-                r"\b(?:to|deliver to|at|for)\s+([A-Za-z0-9\s]{2,20}?)(?:\s+(?:on|from|in|using|via)\s+[A-Za-z]+|\s*$)",
+        elif name in ("query", "track_or_artist"):
+            # Patterns like: "play jazz on youtube", "search lofi on youtube", "find bohemian rhapsody on spotify"
+            m = re.search(
+                r"(?:play|listen to|search(?:\s+for)?|find)\s+(.*?)(?:\s+(?:on|in|using|via)\s+(?:youtube|spotify|music|app)|\s*$)",
                 command,
                 re.IGNORECASE,
             )
-            if addr_match:
-                extracted[name] = addr_match.group(1).strip()
+            if m and m.group(1).strip():
+                extracted[name] = m.group(1).strip()
+        elif name in ("dish_name", "item_name"):
+            # Patterns like: "order biryani on zomato", "buy sony headphones on amazon", "search pizza"
+            m = re.search(
+                r"(?:order|buy|get|search(?:\s+for)?|find)\s+(.*?)(?:\s+(?:on|in|from|using|via)\s+(?:zomato|swiggy|amazon|flipkart|app)|\s*$)",
+                command,
+                re.IGNORECASE,
+            )
+            if m and m.group(1).strip():
+                extracted[name] = m.group(1).strip()
+        elif name == "contact_name":
+            # Patterns like: "send ... to Mom on whatsapp", "message Mom on whatsapp", "to Mom"
+            m = re.search(
+                r"(?:to|message)\s+([A-Za-z0-9\s]+?)(?:\s+(?:on|in|via)\s+whatsapp|\s*$)",
+                command,
+                re.IGNORECASE,
+            )
+            if m and m.group(1).strip():
+                extracted[name] = m.group(1).strip()
+        elif name in ("message", "message_text"):
+            # Patterns like: "send <message> to <contact>", "saying <message>"
+            m = re.search(r"(?:send|text|saying)\s+(.*?)(?:\s+to\s+[A-Za-z0-9\s]+|\s*$)", command, re.IGNORECASE)
+            if m and m.group(1).strip():
+                extracted[name] = m.group(1).strip()
 
     # 2. Async Gemini extraction
     client = _get_client()

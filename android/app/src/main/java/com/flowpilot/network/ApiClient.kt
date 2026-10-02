@@ -45,6 +45,10 @@ interface FlowPilotApi {
     @Multipart
     @POST("/api/match/audio")
     suspend fun matchAudioCommand(@Part audio: MultipartBody.Part): MatchResult
+
+    @Multipart
+    @POST("/api/match/audio/partial")
+    suspend fun matchAudioPartial(@Part audio: MultipartBody.Part): Map<String, Any>
 }
 
 /**

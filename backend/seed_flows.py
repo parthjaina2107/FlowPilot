@@ -30,9 +30,12 @@ SAMPLE_FLOWS = [
             "Order two Margherita pizzas from Domino's",
             "Order a Margherita from Domino's, deliver to work",
             "Order butter chicken on Zomato",
+            "Order food on Zomato",
             "Get food from Zomato",
             "Order dinner from Zomato",
             "Zomato food order",
+            "Order pizza on Zomato",
+            "Order biryani on Zomato",
             "Order butter chicken to Home on Zomato",
             "Deliver food to Work from Zomato"
         ],
@@ -66,17 +69,20 @@ SAMPLE_FLOWS = [
             "Watch a video on YouTube",
             "YouTube play song",
             "Put on music on YouTube",
-            "Play lofi hip hop on YouTube"
+            "Play lofi hip hop on YouTube",
+            "Play jazz on YouTube",
+            "Play video on YouTube",
+            "Play song on YouTube"
         ],
         target_app_package="com.google.android.youtube",
         parameter_schema={
             "query": {"type": "string", "description": "Search term or song title", "default": "lofi hip hop"}
         },
         steps=[
-            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.google.android.youtube"}, description="Open YouTube", wait_after_ms=2000),
-            FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search icon", wait_after_ms=800),
-            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search YouTube"}, parameter_slot="query", default_value="lofi hip hop", description="Type video title", wait_after_ms=1500),
-            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "lofi"}, description="Tap first search result", wait_after_ms=2000)
+            FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.google.android.youtube"}, description="Open YouTube", wait_after_ms=2500),
+            FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search icon", wait_after_ms=1500),
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search YouTube"}, parameter_slot="query", default_value="lofi hip hop", description="Type video title", wait_after_ms=2500),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "content_description_contains": "lofi"}, parameter_slot="query", default_value="lofi", description="Tap video to play", wait_after_ms=3000)
         ],
         created_at="2026-09-29T10:05:00Z",
         version=1
@@ -89,7 +95,10 @@ SAMPLE_FLOWS = [
             "Send a message on WhatsApp",
             "Text someone on WhatsApp",
             "WhatsApp message",
-            "Send WhatsApp to"
+            "Send WhatsApp to",
+            "Send message to Mom on WhatsApp",
+            "Send hi to Mom on WhatsApp",
+            "Message Mom on WhatsApp"
         ],
         target_app_package="com.whatsapp",
         parameter_schema={
@@ -100,7 +109,7 @@ SAMPLE_FLOWS = [
             FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.whatsapp"}, description="Open WhatsApp", wait_after_ms=2000),
             FlowStep(step_index=1, action_type="click", selector={"role": "imageview", "content_description_contains": "Search"}, description="Tap search contact", wait_after_ms=800),
             FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="contact_name", default_value="Mom", description="Search contact", wait_after_ms=1200),
-            FlowStep(step_index=3, action_type="click", selector={"role": "relativelayout", "text_contains": "Mom"}, description="Select contact chat", wait_after_ms=1000),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "Mom"}, parameter_slot="contact_name", default_value="Mom", description="Select contact chat", wait_after_ms=1000),
             FlowStep(step_index=4, action_type="type", selector={"role": "edittext", "text_contains": "Message"}, parameter_slot="message", default_value="On my way home!", description="Type message", wait_after_ms=1000),
             FlowStep(step_index=5, action_type="click", selector={"role": "imageview", "content_description_contains": "Send"}, description="Send message", wait_after_ms=800)
         ],
@@ -115,7 +124,9 @@ SAMPLE_FLOWS = [
             "Play song on Spotify",
             "Put some music on Spotify",
             "Listen to artist on Spotify",
-            "Spotify play"
+            "Spotify play",
+            "Play music on Spotify",
+            "Play queen on Spotify"
         ],
         target_app_package="com.spotify.music",
         parameter_schema={
@@ -124,8 +135,8 @@ SAMPLE_FLOWS = [
         steps=[
             FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "com.spotify.music"}, description="Open Spotify", wait_after_ms=2500),
             FlowStep(step_index=1, action_type="click", selector={"role": "button", "content_description_contains": "Search"}, description="Tap search tab", wait_after_ms=1000),
-            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "What do you want to listen to?"}, parameter_slot="track_or_artist", default_value="Coldplay", description="Type artist or track", wait_after_ms=1500),
-            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "Coldplay"}, description="Tap top search result", wait_after_ms=1500)
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="track_or_artist", default_value="Coldplay", description="Type artist or track", wait_after_ms=1500),
+            FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "Coldplay"}, parameter_slot="track_or_artist", default_value="Coldplay", description="Tap top search result", wait_after_ms=1500)
         ],
         created_at="2026-09-29T10:15:00Z",
         version=1
@@ -139,7 +150,11 @@ SAMPLE_FLOWS = [
             "Order item on Amazon",
             "Search and buy on Amazon",
             "Amazon buy product",
-            "Purchase something on Amazon"
+            "Purchase something on Amazon",
+            "Search on Amazon",
+            "Buy on Amazon",
+            "Search macbook on Amazon",
+            "Buy headphones on Amazon"
         ],
         target_app_package="in.amazon.mShop.android.shopping",
         parameter_schema={
@@ -147,12 +162,12 @@ SAMPLE_FLOWS = [
         },
         steps=[
             FlowStep(step_index=0, action_type="open_app", selector={"role": "app", "package": "in.amazon.mShop.android.shopping"}, description="Launch Amazon", wait_after_ms=3000),
-            FlowStep(step_index=1, action_type="click", selector={"role": "edittext", "text_contains": "Search Amazon.in"}, description="Tap search bar", wait_after_ms=1000),
-            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search Amazon.in"}, parameter_slot="item_name", default_value="protein powder", description="Type item name", wait_after_ms=1500),
+            FlowStep(step_index=1, action_type="click", selector={"role": "edittext", "text_contains": "Search"}, description="Tap search bar", wait_after_ms=1000),
+            FlowStep(step_index=2, action_type="type", selector={"role": "edittext", "text_contains": "Search"}, parameter_slot="item_name", default_value="protein powder", description="Type item name", wait_after_ms=1500),
             FlowStep(step_index=3, action_type="click", selector={"role": "viewgroup", "text_contains": "protein powder"}, parameter_slot="item_name", default_value="protein powder", description="Tap search suggestion", wait_after_ms=2500),
             FlowStep(step_index=4, action_type="click", selector={"role": "viewgroup", "text_contains": "Results"}, description="Select first search result", wait_after_ms=2000),
             FlowStep(step_index=5, action_type="click", selector={"role": "button", "text_contains": "Add to Cart"}, description="Tap Add to Cart", wait_after_ms=1500),
-            FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "Proceed to checkout"}, description="Proceed to checkout", wait_after_ms=1200, is_auth_pause=True)
+            FlowStep(step_index=6, action_type="click", selector={"role": "button", "text_contains": "checkout"}, description="Proceed to checkout", wait_after_ms=1200, is_auth_pause=True)
         ],
         created_at="2026-09-30T10:00:00Z",
         version=1
