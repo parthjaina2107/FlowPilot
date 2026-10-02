@@ -34,7 +34,7 @@ async def _resolve_match(command: str) -> MatchResult:
         return MatchResult(
             matched=False,
             transcribed_text=command,
-            suggestion=f"I haven't learned how to do '{command}' yet. Would you like to teach me?",
+            suggestion=f"I don't have a flow for: \"{command}\". Would you like to teach me this task?",
         )
 
     # Extract dynamic parameters
@@ -80,7 +80,14 @@ async def _resolve_match(command: str) -> MatchResult:
     if len(candidates) > 1 and (candidates[0]["confidence"] - candidates[1]["confidence"] < 0.08):
         is_ambiguous = True
         ambiguity_options = [c["flow_name"] for c in candidates[:3]]
-        clarification_prompt = f"Did you mean '{candidates[0]['flow_name']}' or '{candidates[1]['flow_name']}'?"
+        topic = "matching"
+        if any("pizza" in c["flow_name"].lower() for c in candidates[:2]):
+            topic = "pizza"
+        elif any("food" in c["flow_name"].lower() for c in candidates[:2]):
+            topic = "food"
+        elif any("video" in c["flow_name"].lower() or "youtube" in c["flow_name"].lower() for c in candidates[:2]):
+            topic = "video"
+        clarification_prompt = f"You have {len(candidates)} {topic} flows saved. Which one should I use?"
 
     # Condition 2: Borderline / moderate confidence (< 0.75 threshold)
     elif best["confidence"] < 0.75:

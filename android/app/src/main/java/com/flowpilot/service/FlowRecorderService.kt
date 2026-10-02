@@ -72,6 +72,7 @@ class FlowRecorderService : AccessibilityService() {
             private set
         var actionCount = 0
             private set
+        val liveActionDescriptions = java.util.Collections.synchronizedList(mutableListOf<String>())
     }
 
     // Recording state
@@ -88,9 +89,32 @@ class FlowRecorderService : AccessibilityService() {
         pendingTextAction?.let {
             recordedActions.add(it)
             actionCount = recordedActions.size
+            liveActionDescriptions.add(formatActionDescription(it))
             Log.d(TAG, "  📝 Text committed: '${it.typedText}'")
         }
         pendingTextAction = null
+    }
+
+    private fun formatActionDescription(action: UIAction): String {
+        return when (action.actionType) {
+            "open_app" -> "Open ${action.packageName.substringAfterLast('.')}"
+            "click" -> {
+                val label = action.elementText?.trim()?.ifBlank { null }
+                    ?: action.contentDescription?.trim()?.ifBlank { null }
+                    ?: action.elementId?.substringAfterLast('/')?.ifBlank { null }
+                    ?: "target item"
+                "Tap \"$label\""
+            }
+            "type" -> "Enter \"${action.typedText ?: ""}\""
+            "scroll" -> "Scroll down"
+            "long_press" -> {
+                val label = action.elementText?.trim()?.ifBlank { null }
+                    ?: action.contentDescription?.trim()?.ifBlank { null }
+                    ?: "target item"
+                "Long press \"$label\""
+            }
+            else -> action.actionType
+        }
     }
 
     // ─────────────────────────────────────────────
@@ -128,6 +152,10 @@ class FlowRecorderService : AccessibilityService() {
         this.targetPackage = targetPackage
         this.recordedActions.clear()
         actionCount = 0
+        liveActionDescriptions.clear()
+        if (targetPackage.isNotBlank()) {
+            liveActionDescriptions.add("Open ${targetPackage.substringAfterLast('.')}")
+        }
         this.recordingStartTime = System.currentTimeMillis()
         isRecording = true
 
@@ -144,6 +172,8 @@ class FlowRecorderService : AccessibilityService() {
         handler.removeCallbacks(textDebounceRunnable)
         pendingTextAction?.let {
             recordedActions.add(it)
+            actionCount = recordedActions.size
+            liveActionDescriptions.add(formatActionDescription(it))
             pendingTextAction = null
         }
 
@@ -184,6 +214,7 @@ class FlowRecorderService : AccessibilityService() {
         // Infer target package on first app interaction if not pre-specified
         if (targetPackage.isBlank()) {
             targetPackage = pkg
+            liveActionDescriptions.add("Open ${pkg.substringAfterLast('.')}")
             Log.i(TAG, "  🎯 Inferred target package: $targetPackage")
         } else if (pkg != targetPackage) {
             Log.d(TAG, "  🚫 [Bonus 1 Pruning] Dropped out-of-target action in $pkg (target is $targetPackage)")
@@ -212,6 +243,7 @@ class FlowRecorderService : AccessibilityService() {
         val action = buildUIAction("click", source, pkg)
         recordedActions.add(action)
         actionCount = recordedActions.size
+        liveActionDescriptions.add(formatActionDescription(action))
         Log.d(TAG, "  👆 Click: '${action.elementText}' [${action.elementClass}]")
     }
 
@@ -219,6 +251,7 @@ class FlowRecorderService : AccessibilityService() {
         val action = buildUIAction("long_press", source, pkg)
         recordedActions.add(action)
         actionCount = recordedActions.size
+        liveActionDescriptions.add(formatActionDescription(action))
         Log.d(TAG, "  👆 Long press: '${action.elementText}'")
     }
 
@@ -236,6 +269,7 @@ class FlowRecorderService : AccessibilityService() {
         val action = buildUIAction("scroll", source, pkg).copy(scrollDirection = "down")
         recordedActions.add(action)
         actionCount = recordedActions.size
+        liveActionDescriptions.add(formatActionDescription(action))
         Log.d(TAG, "  📜 Scroll in ${action.elementClass}")
     }
 

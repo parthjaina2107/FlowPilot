@@ -317,13 +317,31 @@ async def extract_parameters(command: str, parameter_schema: dict) -> dict[str, 
             )
             if m and m.group(1).strip():
                 extracted[name] = m.group(1).strip()
-        elif name in ("dish_name", "item_name"):
-            # Patterns like: "order biryani on zomato", "buy sony headphones on amazon", "search pizza"
+        elif name in ("dish_name", "item_name", "item"):
+            # Patterns like: "order two naans from zomato", "order a Margherita pizza", "buy sony headphones on amazon"
             m = re.search(
-                r"(?:order|buy|get|search(?:\s+for)?|find)\s+(.*?)(?:\s+(?:on|in|from|using|via)\s+(?:zomato|swiggy|amazon|flipkart|app)|\s*$)",
+                r"(?:order|buy|get|search(?:\s+for)?|find)\s+(?:(?:a|an|the|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(.*?)(?:\s+(?:from|at|on|in|using|via)\s+(?:zomato|domino['’]s|swiggy|amazon|flipkart|app)|\s*$)",
                 command,
                 re.IGNORECASE,
             )
+            if m and m.group(1).strip():
+                item_val = m.group(1).strip()
+                item_val = re.sub(r"\s+(?:from|at|on|in)\s+.*$", "", item_val, flags=re.IGNORECASE).strip()
+                extracted[name] = item_val
+            else:
+                m2 = re.search(
+                    r"(?:order|buy|get|search(?:\s+for)?|find)\s+(.*?)(?:\s+(?:on|in|from|using|via)\s+(?:zomato|swiggy|amazon|flipkart|app)|\s*$)",
+                    command,
+                    re.IGNORECASE,
+                )
+                if m2 and m2.group(1).strip():
+                    extracted[name] = m2.group(1).strip()
+        elif name in ("restaurant", "store", "shop"):
+            m = re.search(r"(?:from|at)\s+([A-Za-z0-9'\s]+?)(?:\s+(?:on|in|using|via)\s+[A-Za-z]+|\s*$)", command, re.IGNORECASE)
+            if m and m.group(1).strip():
+                extracted[name] = m.group(1).strip()
+        elif name in ("address", "location"):
+            m = re.search(r"(?:deliver to|to)\s+(Home|Work|Office|[A-Za-z0-9\s]+?)(?:\s+(?:on|from|using|via)|\s*$)", command, re.IGNORECASE)
             if m and m.group(1).strip():
                 extracted[name] = m.group(1).strip()
         elif name == "contact_name":

@@ -182,6 +182,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var replayTotalSteps by remember { mutableIntStateOf(0) }
     var replayStepDesc by remember { mutableStateOf("") }
 
+    // Per-step verification tracking for live replay progress UI
+    // Each entry: step description → status ("pending", "running", "verified", "failed")
+    var replayStepStatuses by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+
     // Auth Pause State (T11)
     var showAuthPauseDialog by remember { mutableStateOf(false) }
     var authPauseStepDesc by remember { mutableStateOf("") }
@@ -198,6 +202,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
     var ambiguityPrompt by remember { mutableStateOf("") }
     var ambiguityOptions by remember { mutableStateOf<List<String>>(emptyList()) }
     var pendingAmbiguousMatch by remember { mutableStateOf<MatchResult?>(null) }
+
+    // Edit Confirmation Dialog State (Item 2)
+    var showEditConfirmDialog by remember { mutableStateOf(false) }
+    var editParametersMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
     // Mid-Flow Parameter Clarification State (Bonus 3)
     var showParamNeededDialog by remember { mutableStateOf(false) }
@@ -268,6 +276,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         replayFlowName = match.flowName ?: flow.flowName
         replayTotalSteps = flow.steps.size
         replayCurrentStep = 0
+
+        // Initialize step-by-step status list for live progress UI
+        replayStepStatuses = flow.steps.map { it.description to "pending" }
+
         speak("Executing $replayFlowName")
         FeedbackManager.speak("Executing $replayFlowName")
 
@@ -314,11 +326,19 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             return
         }
 
-        voiceState = VoiceState.MATCHING
-        statusMessage = "Understanding '$text'..."
+        // ── Step 1: Show Final Transcript (what FlowPilot heard) ──
+        voiceState = VoiceState.FINAL_TRANSCRIPT
+        statusMessage = "✓ Audio captured · ✓ Transcription complete"
 
-        // Call backend matching endpoint
         scope.launch {
+            // Brief pause so the user sees their transcript
+            delay(1200)
+
+            // ── Step 2: Understanding (matching + slot extraction) ──
+            voiceState = VoiceState.MATCHING
+            statusMessage = "Understanding command..."
+
+            // Call backend matching endpoint
             try {
                 val res = ApiClient.api.matchTextCommand(mapOf("command" to text))
                 matchResult = res
@@ -337,20 +357,12 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         return@launch
                     }
 
+                    // ── Step 3: Show Confirmation (user must explicitly tap Run Flow) ──
                     voiceState = VoiceState.CONFIRMATION
-                    statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
-                    speak("Matched ${res.flowName}")
+                    statusMessage = "Matched '${res.flowName}' — Confirm to execute"
+                    speak("Matched ${res.flowName}. Ready to execute.")
                     FeedbackManager.speak("Matched ${res.flowName}")
-
-                    // 3-second auto-start countdown
-                    autoRunCountdown = 3
-                    while (autoRunCountdown > 0 && voiceState == VoiceState.CONFIRMATION) {
-                        delay(1000)
-                        autoRunCountdown--
-                    }
-                    if (voiceState == VoiceState.CONFIRMATION && autoRunCountdown == 0) {
-                        startReplayForMatch(res)
-                    }
+                    // No auto-start countdown — user explicitly taps [Run Flow]
                 } else {
                     voiceState = VoiceState.NO_MATCH
                     val msg = res.suggestion ?: "No matching flow found for '$text'."
@@ -379,8 +391,9 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             return
         }
 
+        // Show uploading / transcribing state
         voiceState = VoiceState.MATCHING
-        statusMessage = "Understanding voice command..."
+        statusMessage = "Transcribing voice command..."
 
         scope.launch {
             try {
@@ -397,6 +410,10 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
 
                 if (heardText.isNotBlank()) {
                     Log.i("FlowPilot", "🎙️ STT Transcribed: '$heardText'")
+                    // ── Show Final Transcript before proceeding ──
+                    voiceState = VoiceState.FINAL_TRANSCRIPT
+                    statusMessage = "✓ Audio captured · ✓ Transcription complete"
+                    delay(1000)
                 }
 
                 if (res.matched && res.flowGraph != null) {
@@ -412,20 +429,12 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         return@launch
                     }
 
+                    // ── Show Confirmation (user must explicitly tap Run Flow) ──
                     voiceState = VoiceState.CONFIRMATION
-                    statusMessage = "Matched '${res.flowName}' (${((res.confidence ?: 0.9) * 100).toInt()}% confidence)"
-                    speak("Matched ${res.flowName}")
+                    statusMessage = "Matched '${res.flowName}' — Confirm to execute"
+                    speak("Matched ${res.flowName}. Ready to execute.")
                     FeedbackManager.speak("Matched ${res.flowName}")
-
-                    // 3-second auto-start countdown
-                    autoRunCountdown = 3
-                    while (autoRunCountdown > 0 && voiceState == VoiceState.CONFIRMATION) {
-                        delay(1000)
-                        autoRunCountdown--
-                    }
-                    if (voiceState == VoiceState.CONFIRMATION && autoRunCountdown == 0) {
-                        startReplayForMatch(res)
-                    }
+                    // No auto-start countdown — user explicitly taps [Run Flow]
                 } else {
                     if (heardText.isBlank()) {
                         voiceState = VoiceState.ERROR
@@ -552,18 +561,35 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         }
     }
 
-    // Register BroadcastReceiver for Replay events (Step Progress, Auth Pause, Done)
+    // Register BroadcastReceiver for Replay events (Step Progress, Verification, Auth Pause, Done)
     DisposableEffect(context) {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
                 when (intent?.action) {
                     FlowReplayService.ACTION_REPLAY_STEP -> {
-                        replayCurrentStep = intent.getIntExtra(FlowReplayService.EXTRA_STEP_INDEX, 0) + 1
+                        val stepIdx = intent.getIntExtra(FlowReplayService.EXTRA_STEP_INDEX, 0)
+                        replayCurrentStep = stepIdx + 1
                         replayTotalSteps = intent.getIntExtra(FlowReplayService.EXTRA_TOTAL_STEPS, 1)
                         replayStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: ""
                         replayFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
                         voiceState = VoiceState.REPLAYING
                         statusMessage = "Executing step $replayCurrentStep/$replayTotalSteps: $replayStepDesc"
+
+                        // Update per-step status: mark current step as "running"
+                        replayStepStatuses = replayStepStatuses.mapIndexed { i, (desc, _) ->
+                            when {
+                                i < stepIdx -> desc to "verified"  // previous steps assumed verified
+                                i == stepIdx -> desc to "running"
+                                else -> desc to "pending"
+                            }
+                        }
+                    }
+                    FlowReplayService.ACTION_STEP_VERIFIED -> {
+                        val stepIdx = intent.getIntExtra(FlowReplayService.EXTRA_STEP_INDEX, 0)
+                        val verified = intent.getBooleanExtra(FlowReplayService.EXTRA_STEP_VERIFIED, false)
+                        replayStepStatuses = replayStepStatuses.mapIndexed { i, (desc, status) ->
+                            if (i == stepIdx) desc to (if (verified) "verified" else "failed") else desc to status
+                        }
                     }
                     FlowReplayService.ACTION_AUTH_PAUSE -> {
                         authPauseStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: "Security verification"
@@ -575,14 +601,25 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         val success = intent.getBooleanExtra(FlowReplayService.EXTRA_SUCCESS, false)
                         voiceState = if (success) VoiceState.DONE else VoiceState.ERROR
                         statusMessage = if (success) "Flow automation completed successfully! 🎉" else "Replay encountered an issue."
-                        if (success) speak("Flow completed successfully!") else speak("Automation stopped.")
+                        if (success) {
+                            // Mark all remaining steps as verified
+                            replayStepStatuses = replayStepStatuses.map { (desc, _) -> desc to "verified" }
+                            speak("Flow completed successfully!")
+                        } else {
+                            speak("Automation stopped.")
+                        }
                     }
                     FlowReplayService.ACTION_REPLAY_STUCK -> {
+                        val stuckIdx = intent.getIntExtra(FlowReplayService.EXTRA_STEP_INDEX, 0)
                         stuckStepDesc = intent.getStringExtra(FlowReplayService.EXTRA_STEP_DESC) ?: "Unknown step"
                         stuckFlowName = intent.getStringExtra(FlowReplayService.EXTRA_FLOW_NAME) ?: ""
                         stuckReason = intent.getStringExtra(FlowReplayService.EXTRA_STUCK_REASON) ?: "Target UI element not found"
                         voiceState = VoiceState.ERROR
                         statusMessage = "FlowPilot got stuck at step $replayCurrentStep: $stuckStepDesc"
+                        // Mark stuck step as failed in progress UI
+                        replayStepStatuses = replayStepStatuses.mapIndexed { i, (desc, status) ->
+                            if (i == stuckIdx) desc to "failed" else desc to status
+                        }
                         showStuckDialog = true
                         speak("Automation stopped. $stuckReason")
                     }
@@ -599,6 +636,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
 
         val filter = IntentFilter().apply {
             addAction(FlowReplayService.ACTION_REPLAY_STEP)
+            addAction(FlowReplayService.ACTION_STEP_VERIFIED)
             addAction(FlowReplayService.ACTION_AUTH_PAUSE)
             addAction(FlowReplayService.ACTION_REPLAY_DONE)
             addAction(FlowReplayService.ACTION_REPLAY_STUCK)
@@ -690,6 +728,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         statusMessage,
                         color = when (voiceState) {
                             VoiceState.LISTENING, VoiceState.PARTIAL_TRANSCRIPT -> SamsungLightBlue
+                            VoiceState.FINAL_TRANSCRIPT -> AccentGreen
                             VoiceState.MATCHING -> AccentOrange
                             VoiceState.CONFIRMATION, VoiceState.REPLAYING, VoiceState.DONE -> AccentGreen
                             VoiceState.NO_MATCH, VoiceState.ERROR -> AccentOrange
@@ -767,7 +806,49 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 )
                             }
                         }
-                    } else if (recognizedText.isNotBlank()) {
+                    }
+
+                    // ── FINAL TRANSCRIPT: Show what FlowPilot heard ──
+                    if (voiceState == VoiceState.FINAL_TRANSCRIPT && finalTranscript.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = AccentGreen.copy(alpha = 0.12f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, AccentGreen.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Text(
+                                    "🎙 FlowPilot Heard:",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AccentGreen
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    "\"$finalTranscript\"",
+                                    color = TextPrimary,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Filled.Check, contentDescription = null, tint = AccentGreen, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Audio captured", fontSize = 11.sp, color = AccentGreen)
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Icon(Icons.Filled.Check, contentDescription = null, tint = AccentGreen, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Transcription complete", fontSize = 11.sp, color = AccentGreen)
+                                }
+                            }
+                        }
+                    }
+
+                    // Show recognized text for MATCHING / NO_MATCH states
+                    if (voiceState != VoiceState.FINAL_TRANSCRIPT && voiceState != VoiceState.PARTIAL_TRANSCRIPT && recognizedText.isNotBlank()) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             "\"$recognizedText\"",
@@ -776,6 +857,61 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             fontWeight = FontWeight.SemiBold,
                             textAlign = TextAlign.Center
                         )
+                    }
+
+                    // Item 10: Unknown Command Card
+                    if (voiceState == VoiceState.NO_MATCH) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = CardBg),
+                            shape = RoundedCornerShape(14.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, AccentOrange.copy(alpha = 0.6f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Filled.HelpOutline, contentDescription = null, tint = AccentOrange, modifier = Modifier.size(20.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("I don't have a flow for:", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextPrimary)
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "\"${finalTranscript.ifBlank { recognizedText }}\"",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = AccentOrange
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "Would you like to teach me this task?",
+                                    fontSize = 13.sp,
+                                    color = TextSecondary
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Button(
+                                        onClick = onRecordClick,
+                                        colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue),
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                    ) {
+                                        Icon(Icons.Filled.FiberManualRecord, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Teach FlowPilot", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                    OutlinedButton(
+                                        onClick = {
+                                            voiceState = VoiceState.IDLE
+                                            statusMessage = "Ready for voice command"
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                    ) {
+                                        Text("Dismiss", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Phase 18: Inline Try Again Button on Error
@@ -793,11 +929,11 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         }
                     }
 
-                    // Progress indicator for REPLAY
-                    if (voiceState == VoiceState.REPLAYING && replayTotalSteps > 0) {
+                    // ── REPLAY: Step-by-step checklist progress ──
+                    if ((voiceState == VoiceState.REPLAYING || voiceState == VoiceState.DONE || voiceState == VoiceState.ERROR) && replayStepStatuses.isNotEmpty()) {
                         Spacer(modifier = Modifier.height(12.dp))
                         LinearProgressIndicator(
-                            progress = { (replayCurrentStep.toFloat() / replayTotalSteps.toFloat()).coerceIn(0f, 1f) },
+                            progress = { (replayCurrentStep.toFloat() / replayTotalSteps.toFloat().coerceAtLeast(1f)).coerceIn(0f, 1f) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(6.dp)
@@ -805,11 +941,51 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             color = AccentGreen,
                             trackColor = SurfaceBg
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "▶ Replaying $replayFlowName",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // Per-step checklist
+                        replayStepStatuses.forEachIndexed { idx, (desc, status) ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val (icon, tint) = when (status) {
+                                    "verified" -> Icons.Filled.Check to AccentGreen
+                                    "running" -> Icons.Filled.PlayArrow to SamsungLightBlue
+                                    "failed" -> Icons.Filled.Close to Color(0xFFE5534B)
+                                    else -> Icons.Filled.RadioButtonUnchecked to TextSecondary
+                                }
+                                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    desc,
+                                    fontSize = 12.sp,
+                                    color = when (status) {
+                                        "verified" -> AccentGreen
+                                        "running" -> TextPrimary
+                                        "failed" -> Color(0xFFE5534B)
+                                        else -> TextSecondary
+                                    },
+                                    fontWeight = if (status == "running") FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            "$replayFlowName — Step $replayCurrentStep of $replayTotalSteps",
+                            "Step $replayCurrentStep / $replayTotalSteps",
                             color = TextSecondary,
-                            fontSize = 12.sp
+                            fontSize = 11.sp
                         )
                     }
                 }
@@ -869,19 +1045,25 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     border = androidx.compose.foundation.BorderStroke(1.dp, SamsungLightBlue.copy(alpha = 0.7f))
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
+                        // Header: "I understood:"
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = SamsungLightBlue, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Flow Matched", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = TextPrimary)
-                            Spacer(modifier = Modifier.weight(1f))
+                            Text("I understood:", fontWeight = FontWeight.Bold, fontSize = 17.sp, color = TextPrimary)
+                            val conf = ((matchResult!!.confidence ?: 0.9) * 100).toInt()
+                            val badgeColor = when {
+                                conf >= 85 -> AccentGreen
+                                conf >= 70 -> AccentOrange
+                                else -> Color(0xFFEF4444)
+                            }
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = AccentGreen.copy(alpha = 0.2f),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, AccentGreen)
+                                color = badgeColor.copy(alpha = 0.2f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, badgeColor)
                             ) {
                                 Text(
-                                    "${((matchResult!!.confidence ?: 0.9) * 100).toInt()}% confidence",
-                                    color = AccentGreen,
+                                    "$conf% Match",
+                                    color = badgeColor,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
@@ -889,12 +1071,26 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             }
                         }
 
+                        // Transcribed Command
                         Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            "Command: \"${finalTranscript.ifBlank { recognizedText }}\"",
-                            fontSize = 13.sp,
-                            color = TextSecondary
-                        )
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SamsungBlue.copy(alpha = 0.15f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                "\"${finalTranscript.ifBlank { recognizedText }}\"",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(12.dp).fillMaxWidth()
+                            )
+                        }
+
+                        // Matched Flow Section
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("MATCHED FLOW", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = SamsungLightBlue)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             matchResult!!.flowName ?: flow.flowName,
@@ -908,20 +1104,50 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             color = TextSecondary
                         )
 
+                        // Parameters / Slots Table
                         if (!matchResult!!.parameters.isNullOrEmpty()) {
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text("Parameters / Slots:", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = TextPrimary)
-                            matchResult!!.parameters!!.forEach { (k, v) ->
-                                Row(modifier = Modifier.padding(vertical = 1.dp)) {
-                                    Text("• $k: ", color = TextSecondary, fontSize = 13.sp)
-                                    Text(v, color = AccentOrange, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("PARAMETERS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AccentOrange)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SurfaceBg,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    matchResult!!.parameters!!.forEach { (k, v) ->
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 3.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                k.replaceFirstChar { it.uppercase() }.replace("_", " "),
+                                                color = TextSecondary,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Medium
+                                            )
+                                            Text(
+                                                v,
+                                                color = AccentOrange,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 13.sp
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
 
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("App: ${flow.targetAppPackage}", fontSize = 11.sp, color = TextSecondary)
+                        Text(
+                            "App: ${flow.targetAppPackage} · ${flow.steps.size} steps",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
 
+                        // Action Buttons: Cancel / Run Flow (explicit, no countdown)
                         Spacer(modifier = Modifier.height(16.dp))
                         Row(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -929,20 +1155,19 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                         ) {
                             OutlinedButton(
                                 onClick = {
-                                    voiceState = VoiceState.IDLE
-                                    autoRunCountdown = 0
-                                    matchResult = null
-                                    statusMessage = "Flow cancelled."
+                                    editParametersMap = matchResult?.parameters?.toMutableMap() ?: mutableMapOf()
+                                    showEditConfirmDialog = true
                                 },
                                 modifier = Modifier.weight(1f),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
-                                Text("Cancel")
+                                Icon(Icons.Filled.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Edit")
                             }
 
                             Button(
                                 onClick = {
-                                    autoRunCountdown = 0
                                     startReplayForMatch(matchResult!!)
                                 },
                                 modifier = Modifier.weight(1.5f),
@@ -951,10 +1176,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                             ) {
                                 Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    if (autoRunCountdown > 0) "Run Flow (${autoRunCountdown}s)" else "Run Flow",
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Text("Run Flow", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -1215,7 +1437,70 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         }
     }
 
-    // Security Auth Pause Dialog (PPT Slide 6 & 10)
+    // Item 2: Edit Parameters Dialog before replay
+    if (showEditConfirmDialog && matchResult != null) {
+        AlertDialog(
+            onDismissRequest = { showEditConfirmDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Edit, contentDescription = null, tint = SamsungLightBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Edit Parameters", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "Adjust values before running '${matchResult!!.flowName}':",
+                        fontSize = 13.sp,
+                        color = TextSecondary
+                    )
+                    if (editParametersMap.isEmpty()) {
+                        Text("No dynamic parameters detected in this flow.", fontSize = 12.sp, color = TextSecondary)
+                    } else {
+                        editParametersMap.forEach { (slotKey, slotVal) ->
+                            OutlinedTextField(
+                                value = slotVal,
+                                onValueChange = { newVal ->
+                                    editParametersMap = editParametersMap.toMutableMap().apply { put(slotKey, newVal) }
+                                },
+                                label = { Text(slotKey.replaceFirstChar { it.uppercase() }.replace("_", " ")) },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = SamsungLightBlue,
+                                    focusedLabelColor = SamsungLightBlue,
+                                    cursorColor = SamsungLightBlue
+                                )
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showEditConfirmDialog = false
+                        val updatedMatch = matchResult!!.copy(parameters = editParametersMap)
+                        matchResult = updatedMatch
+                        startReplayForMatch(updatedMatch)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen)
+                ) {
+                    Text("Save & Run Flow")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showEditConfirmDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = CardBg,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    // Item 9: Security Boundary Auth Pause Dialog
     if (showAuthPauseDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -1226,20 +1511,22 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Filled.Lock, contentDescription = null, tint = AccentOrange)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Security Auth Pause", fontWeight = FontWeight.Bold)
+                    Text("🔒 FlowPilot Paused", fontWeight = FontWeight.Bold)
                 }
             },
             text = {
                 Column {
                     Text(
-                        "The automation '$authPauseFlowName' has reached a protected step requiring your verification:",
+                        "This screen requires user authentication.",
                         color = TextPrimary,
-                        fontSize = 14.sp
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Card(
                         colors = CardDefaults.cardColors(containerColor = SurfaceBg),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
                             authPauseStepDesc,
@@ -1251,7 +1538,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        "Please authenticate with Fingerprint / PIN on your device, then tap Continue.",
+                        "Please complete this step yourself on your device (e.g. UPI PIN, Password, OTP, or Payment confirmation). FlowPilot never records or inputs credentials.",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
@@ -1265,7 +1552,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = AccentGreen)
                 ) {
-                    Text("I've Authenticated (Continue)")
+                    Text("I've Completed It")
                 }
             },
             dismissButton = {
@@ -1283,7 +1570,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
         )
     }
 
-    // T10: Genuinely Stuck Dialog — asks the user what to do when an unexpected screen or failure occurs
+    // Item 5: Intelligent Stuck Dialog
     if (showStuckDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -1299,40 +1586,61 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
             text = {
                 Column {
                     Text(
-                        "Automation '$stuckFlowName' stopped safely to prevent wrong taps:",
+                        "Automation '$stuckFlowName' paused:",
                         color = TextPrimary,
                         fontSize = 14.sp
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Card(
                         colors = CardDefaults.cardColors(containerColor = SurfaceBg),
-                        shape = RoundedCornerShape(8.dp)
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text(
-                            "$stuckStepDesc\nReason: $stuckReason",
-                            color = AccentOrange,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.padding(10.dp)
-                        )
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                "Step: $stuckStepDesc",
+                                color = TextPrimary,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                stuckReason,
+                                color = AccentOrange,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        "App language change, account logout, or UI obstruction detected. How would you like to proceed?",
+                        "How would you like to proceed?",
                         color = TextSecondary,
                         fontSize = 12.sp
                     )
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        showStuckDialog = false
-                        statusMessage = "Manual takeover active. You can now complete the task."
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = AccentGreen)
-                ) {
-                    Text("I'll Take Over (Manual)")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            showStuckDialog = false
+                            // Retry replay for the matched flow
+                            matchResult?.let { startReplayForMatch(it) }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = SamsungBlue)
+                    ) {
+                        Text("Try Again")
+                    }
+                    Button(
+                        onClick = {
+                            showStuckDialog = false
+                            statusMessage = "Manual takeover active. You can now complete the task."
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen)
+                    ) {
+                        Text("Continue Manually")
+                    }
                 }
             },
             dismissButton = {
@@ -1349,7 +1657,7 @@ fun HomeScreen(onRecordClick: () -> Unit, onFlowsClick: () -> Unit) {
                                 Log.e("FlowPilot", "Failed to cancel service", e)
                             }
                         }
-                        statusMessage = "Flow cancelled after being stuck."
+                        statusMessage = "Flow cancelled."
                     }
                 ) {
                     Text("Cancel Flow")
@@ -1593,14 +1901,18 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
     var targetPackage by remember { mutableStateOf("") }
     var recordState by remember { mutableStateOf(RecordState.IDLE) }
     var actionCount by remember { mutableIntStateOf(0) }
+    var liveActions by remember { mutableStateOf<List<String>>(emptyList()) }
     var compilationStatus by remember { mutableStateOf("") }
     var compiledFlow by remember { mutableStateOf<FlowGraph?>(null) }
     var errorMessage by remember { mutableStateOf("") }
 
-    // Poll action count while recording
+    // Poll action count and live action descriptions while recording
     LaunchedEffect(recordState) {
         while (recordState == RecordState.RECORDING) {
             actionCount = FlowRecorderService.actionCount
+            liveActions = synchronized(FlowRecorderService.liveActionDescriptions) {
+                FlowRecorderService.liveActionDescriptions.toList()
+            }
             delay(400)
         }
     }
@@ -1714,7 +2026,7 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                     }
                 }
             } else if (recordState == RecordState.COMPILED && compiledFlow != null) {
-                // Compilation Success View
+                // Compilation Success View - Item 8: parameter list after compilation
                 val flow = compiledFlow!!
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -1726,7 +2038,7 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = AccentGreen, modifier = Modifier.size(28.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Flow Generalised!", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = TextPrimary)
+                            Text("Flow created ✓", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = TextPrimary)
                         }
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(flow.flowName, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = SamsungLightBlue)
@@ -1734,8 +2046,23 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text("⚡ Steps: ${flow.steps.size} generalised steps", fontSize = 13.sp, color = TextPrimary)
                         Text("🗣️ Triggers: ${flow.triggerPhrases.joinToString(", ")}", fontSize = 12.sp, color = TextSecondary)
+
                         if (flow.parameterSchema.isNotEmpty()) {
-                            Text("🧩 Parameters: ${flow.parameterSchema.keys.joinToString(", ")}", fontSize = 12.sp, color = AccentOrange)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("Parameters detected:", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AccentOrange)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SurfaceBg,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    flow.parameterSchema.forEach { (paramName, paramDef) ->
+                                        val descText = if (paramDef.description.isNotBlank()) " (${paramDef.description})" else " (${paramDef.type})"
+                                        Text("• $paramName$descText", fontSize = 12.sp, color = TextPrimary)
+                                    }
+                                }
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(16.dp))
@@ -1745,7 +2072,7 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                             colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text("View in My Flows")
+                            Text("Done (View in My Flows)")
                         }
                     }
                 }
@@ -1818,7 +2145,7 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                         ) {
                             Text("🔴 RECORDING IN PROGRESS", fontSize = 16.sp, color = Color.Red, fontWeight = FontWeight.Bold)
                             Spacer(modifier = Modifier.height(6.dp))
-                            Text("$actionCount interactions captured", color = TextPrimary, fontSize = 15.sp)
+                            Text("$actionCount interactions captured", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
                                 "Switch to the app, perform the actions you want FlowPilot to learn, then come back and tap Stop.",
@@ -1826,6 +2153,31 @@ fun RecordScreen(onBack: () -> Unit, onFlowCompiled: () -> Unit) {
                                 fontSize = 12.sp,
                                 textAlign = TextAlign.Center
                             )
+                        }
+                    }
+
+                    // Item 8: Live checklist of captured actions during recording
+                    if (liveActions.isNotEmpty()) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = CardBg),
+                            shape = RoundedCornerShape(16.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBg)
+                        ) {
+                            Column(modifier = Modifier.padding(16.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Filled.List, contentDescription = null, tint = SamsungLightBlue, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Captured Actions (${liveActions.size})", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = TextPrimary)
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    liveActions.takeLast(6).forEachIndexed { idx, desc ->
+                                        val actualIdx = if (liveActions.size > 6) liveActions.size - 6 + idx + 1 else idx + 1
+                                        Text("$actualIdx. $desc", fontSize = 12.sp, color = TextSecondary)
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -2029,6 +2381,18 @@ fun FlowListScreen(onBack: () -> Unit) {
                                     maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
+
+                                val triggers = flow["trigger_phrases"] ?: ""
+                                if (triggers.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        "🗣️ $triggers",
+                                        fontSize = 11.sp,
+                                        color = AccentOrange,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
 
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Row(

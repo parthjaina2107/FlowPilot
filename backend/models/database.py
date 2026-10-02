@@ -84,9 +84,24 @@ def list_flows() -> list[dict]:
     """Return summary info for all flows."""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT flow_id, flow_name, description, target_app_package, created_at FROM flows ORDER BY created_at DESC"
+        "SELECT flow_id, flow_name, description, target_app_package, flow_json, created_at FROM flows ORDER BY created_at DESC"
     ).fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = {
+            "flow_id": r["flow_id"],
+            "flow_name": r["flow_name"],
+            "description": r["description"],
+            "target_app_package": r["target_app_package"],
+            "created_at": r["created_at"],
+        }
+        try:
+            fj = json.loads(r["flow_json"])
+            d["trigger_phrases"] = ", ".join(fj.get("trigger_phrases", []))
+        except Exception:
+            d["trigger_phrases"] = ""
+        result.append(d)
+    return result
 
 
 def delete_flow(flow_id: str) -> bool:

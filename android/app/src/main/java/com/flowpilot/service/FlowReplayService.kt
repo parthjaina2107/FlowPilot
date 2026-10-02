@@ -53,6 +53,7 @@ class FlowReplayService : AccessibilityService() {
         const val ACTION_AUTH_CANCEL = "com.flowpilot.AUTH_CANCEL"
         const val ACTION_PARAM_NEEDED = "com.flowpilot.PARAM_NEEDED"
         const val ACTION_PARAM_PROVIDED = "com.flowpilot.PARAM_PROVIDED"
+        const val ACTION_STEP_VERIFIED = "com.flowpilot.STEP_VERIFIED"
 
         const val EXTRA_FLOW_JSON = "flow_json"
         const val EXTRA_PARAMS_JSON = "params_json"
@@ -64,6 +65,7 @@ class FlowReplayService : AccessibilityService() {
         const val EXTRA_STUCK_REASON = "stuck_reason"
         const val EXTRA_PARAM_NAME = "param_name"
         const val EXTRA_PARAM_VALUE = "param_value"
+        const val EXTRA_STEP_VERIFIED = "step_verified"
 
         private const val PREFS_NAME = "flowpilot_replay_prefs"
         private const val NOTIFICATION_ID = 2001
@@ -254,6 +256,17 @@ class FlowReplayService : AccessibilityService() {
             delay(step.waitAfterMs.toLong())
 
             val success = executeStep(step, flow, params)
+
+            // Broadcast per-step verification result for live progress UI
+            val verifyIntent = Intent(ACTION_STEP_VERIFIED).apply {
+                putExtra(EXTRA_STEP_INDEX, step.stepIndex)
+                putExtra(EXTRA_STEP_VERIFIED, success)
+                putExtra(EXTRA_STEP_DESC, step.description)
+                putExtra(EXTRA_FLOW_NAME, flow.flowName)
+                setPackage(packageName)
+            }
+            sendBroadcast(verifyIntent)
+
             if (success) {
                 successCount++
             } else {
@@ -263,11 +276,11 @@ class FlowReplayService : AccessibilityService() {
 
                 lastRunSuccess = false
                 lastRunHaltedStep = step.stepIndex + 1
-                lastRunReason = "Could not find or interact with element for: ${step.description}"
+                lastRunReason = diagnoseStuckReason(step, flow)
 
                 showStuckNotification(step.description, step.stepIndex + 1, flow.steps.size)
                 FeedbackManager.vibrateAlert()
-                FeedbackManager.speak("Flow halted at step ${step.stepIndex + 1}. Could not find element for ${step.description}.")
+                FeedbackManager.speak("Flow halted at step ${step.stepIndex + 1}. $lastRunReason")
 
                 val stuckIntent = Intent(ACTION_REPLAY_STUCK).apply {
                     putExtra(EXTRA_STEP_INDEX, step.stepIndex)
@@ -400,6 +413,8 @@ class FlowReplayService : AccessibilityService() {
             }
         }
 
+        val nextStep = flow.steps.getOrNull(step.stepIndex + 1)
+
         return when (step.actionType) {
             "open_app" -> {
                 var launchIntent = packageManager.getLaunchIntentForPackage(flow.targetAppPackage)
@@ -434,10 +449,10 @@ class FlowReplayService : AccessibilityService() {
                     }
                 }
             }
-            "click" -> performClick(step, effectiveParams)
+            "click" -> performClick(step, flow, effectiveParams, nextStep)
             "type" -> performType(step, effectiveParams)
             "scroll" -> performScroll(step)
-            "long_press" -> performClick(step, effectiveParams)
+            "long_press" -> performLongPress(step, effectiveParams)
             "wait" -> {
                 delay(step.waitAfterMs.toLong())
                 true
@@ -568,7 +583,12 @@ class FlowReplayService : AccessibilityService() {
         return null
     }
 
-    private suspend fun performClick(step: FlowStep, params: Map<String, String>): Boolean {
+    private suspend fun performClick(
+        step: FlowStep,
+        flow: FlowGraph,
+        params: Map<String, String>,
+        nextStep: FlowStep?
+    ): Boolean {
         val resolvedSelector = resolveSelector(step.selector, step, params)
         val node = findElementWithRetry(resolvedSelector) ?: return false
 
@@ -604,25 +624,41 @@ class FlowReplayService : AccessibilityService() {
         }
 
         // Wait slightly for click to register in the UI
-        delay(400)
+        delay(450)
 
-        // Screen change verification
+        // ── Item 4 Verification: Verify that the action actually produced a state change ──
         val stateAfter = captureScreenFingerprint()
-        val screenChanged = stateBefore.isNotEmpty() && stateBefore != stateAfter
-        Log.d(TAG, "👆 Click on '${step.description}' registered=$clicked, screenChanged=$screenChanged")
+        var screenChanged = stateBefore.isNotEmpty() && stateBefore != stateAfter
 
         // If screen didn't change despite click reporting true, try gesture tap fallback
-        if (clicked && !screenChanged) {
-            Log.d(TAG, "  ⚠️ Screen state unchanged after click; trying gesture tap fallback...")
+        if (!screenChanged) {
+            Log.d(TAG, "  ⚠️ Screen state unchanged after click on '${step.description}'; trying gesture tap fallback...")
             dispatchTapGesture(node)
-            delay(350)
+            delay(400)
+            val stateAfterFallback = captureScreenFingerprint()
+            screenChanged = stateBefore.isNotEmpty() && stateBefore != stateAfterFallback
         }
+
+        // Check if next step's expected element became visible (e.g. search input opened, product details loaded)
+        var nextStepAppeared = false
+        if (!screenChanged && nextStep != null) {
+            val nextSelector = resolveSelector(nextStep.selector, nextStep, params)
+            val nextNode = findElementWithRetry(nextSelector, maxRetries = 2)
+            if (nextNode != null) {
+                nextStepAppeared = true
+                nextNode.recycle()
+            }
+        }
+
+        val isFinalStep = step.stepIndex >= flow.steps.size - 1
+        val verified = clicked && (screenChanged || nextStepAppeared || isFinalStep)
+        Log.i(TAG, "👆 Click on '${step.description}' registered=$clicked, screenChanged=$screenChanged, nextStepAppeared=$nextStepAppeared => VERIFIED=$verified")
 
         node.recycle()
 
         // T5: Dynamic Quantity Slot handling (only execute once per flow on item addition)
         val qty = params["quantity"]?.toIntOrNull() ?: 1
-        if (clicked && qty > 1 && !quantityIncrementDone) {
+        if (verified && qty > 1 && !quantityIncrementDone) {
             val isAddStep = step.parameterSlot == "quantity" ||
                     step.description.contains("add", ignoreCase = true) ||
                     step.selector["text_contains"]?.contains("add", ignoreCase = true) == true
@@ -632,7 +668,45 @@ class FlowReplayService : AccessibilityService() {
             }
         }
 
-        return clicked
+        return verified
+    }
+
+    private fun diagnoseStuckReason(step: FlowStep, flow: FlowGraph): String {
+        val root = rootInActiveWindow ?: return "Could not find element for: ${step.description} (Window inactive)"
+        try {
+            val rootPkg = root.packageName?.toString() ?: ""
+            if (rootPkg.isNotBlank() && flow.targetAppPackage.isNotBlank() && rootPkg != flow.targetAppPackage && !rootPkg.contains("flowpilot")) {
+                return "App switched to '$rootPkg' instead of '${flow.targetAppPackage}'. Please return to ${flow.targetAppPackage.substringAfterLast('.')} and tap Try Again."
+            }
+
+            // Check for login / account authentication screen
+            val loginKeywords = listOf("sign in", "log in", "login", "create account", "welcome back", "enter mobile number", "phone number", "register")
+            val isLoggedOut = findNodeRecursive(root) { node ->
+                val text = (node.text?.toString() ?: "").lowercase()
+                val desc = (node.contentDescription?.toString() ?: "").lowercase()
+                loginKeywords.any { kw -> text.contains(kw) || desc.contains(kw) }
+            }
+            if (isLoggedOut != null) {
+                isLoggedOut.recycle()
+                val appName = flow.flowName.split(" ").lastOrNull() ?: flow.targetAppPackage.substringAfterLast(".")
+                return "You're logged out of $appName. Please log in, then tap Continue."
+            }
+
+            // Check for modal dialogs / permission alerts
+            val alertKeywords = listOf("allow", "permission", "deny", "while using the app", "update available", "what's new", "rate us", "dismiss")
+            val hasModal = findNodeRecursive(root) { node ->
+                val text = (node.text?.toString() ?: "").lowercase()
+                alertKeywords.any { kw -> text.contains(kw) }
+            }
+            if (hasModal != null) {
+                hasModal.recycle()
+                return "An unexpected dialog or popup is obstructing the screen. Please dismiss it, then tap Try Again."
+            }
+
+            return "I can't find the '${step.description}' button. The app layout appears to have changed."
+        } finally {
+            root.recycle()
+        }
     }
 
     private suspend fun performLongPress(step: FlowStep, params: Map<String, String>): Boolean {
